@@ -211,7 +211,7 @@ jobs:
       run: |
         DOCKER_USERNAME="${{ secrets.DOCKERHUB_USERNAME }}"
         if [ -z "$DOCKER_USERNAME" ]; then
-          DOCKER_USERNAME="weishaw"
+          DOCKER_USERNAME="leeyx"
         fi
 
         DOCKER_IMAGE=$(echo "${DOCKER_USERNAME}/claude-relay-service" | tr '[:upper:]' '[:lower:]')
