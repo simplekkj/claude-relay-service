@@ -179,6 +179,14 @@ body::before {
   transform: translateY(-1px);
 }
 
+/* Chrome 专用：禁用 backdrop-filter，避免固定背景 + 模糊导致的 GPU 崩溃 */
+.chrome-no-blur [class*='backdrop-blur'],
+.chrome-no-blur .glass,
+.chrome-no-blur .glass-strong {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
 /* 按钮样式 */
 .btn {
   font-weight: 500;
