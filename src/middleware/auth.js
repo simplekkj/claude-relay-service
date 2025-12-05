@@ -1298,7 +1298,7 @@ const globalRateLimit = async (req, res, next) =>
 
 // 📊 请求大小限制中间件
 const requestSizeLimit = (req, res, next) => {
-  const maxSize = 1024 * 1024 * 1024 // 1024MB
+  const maxSize = 512 * 1024 * 1024 // 512MB
   const contentLength = parseInt(req.headers['content-length'] || '0')
 
   if (contentLength > maxSize) {
@@ -1306,7 +1306,7 @@ const requestSizeLimit = (req, res, next) => {
     return res.status(413).json({
       error: 'Payload Too Large',
       message: 'Request body size exceeds limit',
-      limit: '1024MB'
+      limit: '512MB'
     })
   }
 
