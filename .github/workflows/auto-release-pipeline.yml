@@ -25,75 +25,15 @@ jobs:
     - name: Check if version bump is needed
       id: check
       run: |
-        # 检查提交消息是否包含强制发布标记（[force release]）
+        # 需求调整：无论是同步上游（fork sync merge）还是自身代码变更，只要 push/手动触发即执行发布与镜像构建。
+        # 仍保留顶层 job if：提交者不是 github-actions[bot] 且 commit message 未含 [skip ci]。
+
         COMMIT_MSG=$(git log -1 --pretty=%B | tr -d '\r')
         echo "Latest commit message:"
         echo "$COMMIT_MSG"
 
-        FORCE_RELEASE=false
-        if echo "$COMMIT_MSG" | grep -qi "\[force release\]"; then
-          echo "Detected [force release] marker, forcing version bump"
-          FORCE_RELEASE=true
-        fi
-
-        # 检测是否是合并提交
-        PARENT_COUNT=$(git rev-list --parents -n 1 HEAD | wc -w)
-        PARENT_COUNT=$((PARENT_COUNT - 1))
-        echo "Parent count: $PARENT_COUNT"
-        
-        if [ "$PARENT_COUNT" -gt 1 ]; then
-          # 合并提交：获取合并进来的所有文件变更
-          echo "Detected merge commit, getting all merged changes"
-          # 获取合并基准点
-          MERGE_BASE=$(git merge-base HEAD^1 HEAD^2 2>/dev/null || echo "")
-          if [ -n "$MERGE_BASE" ]; then
-            # 获取从合并基准到 HEAD 的所有变更
-            CHANGED_FILES=$(git diff --name-only $MERGE_BASE..HEAD)
-          else
-            # 如果无法获取合并基准，使用第二个父提交
-            CHANGED_FILES=$(git diff --name-only HEAD^2..HEAD)
-          fi
-        else
-          # 普通提交：获取相对于上一个提交的变更
-          CHANGED_FILES=$(git diff --name-only HEAD~1..HEAD 2>/dev/null || git diff --name-only $(git rev-list --max-parents=0 HEAD)..HEAD)
-        fi
-        
-        echo "Changed files:"
-        echo "$CHANGED_FILES"
-        
-        # 检查是否只有无关文件（.md, docs/, .github/等）
-        SIGNIFICANT_CHANGES=false
-        while IFS= read -r file; do
-          # 跳过空行
-          [ -z "$file" ] && continue
-          
-          # 检查是否是需要忽略的文件
-          if [[ ! "$file" =~ \.(md|txt)$ ]] && 
-             [[ ! "$file" =~ ^docs/ ]] && 
-             [[ ! "$file" =~ ^\.github/ ]] &&
-             [[ "$file" != "VERSION" ]] &&
-             [[ "$file" != ".gitignore" ]] &&
-             [[ "$file" != "LICENSE" ]]; then
-            echo "Found significant change in: $file"
-            SIGNIFICANT_CHANGES=true
-            break
-          fi
-        done <<< "$CHANGED_FILES"
-
-        # 检查是否是手动触发
-        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-          echo "Manual workflow trigger detected, forcing version bump"
-          echo "needs_bump=true" >> $GITHUB_OUTPUT
-        elif [ "$FORCE_RELEASE" = true ]; then
-          echo "Force release marker detected, forcing version bump"
-          echo "needs_bump=true" >> $GITHUB_OUTPUT
-        elif [ "$SIGNIFICANT_CHANGES" = true ]; then
-          echo "Significant changes detected, version bump needed"
-          echo "needs_bump=true" >> $GITHUB_OUTPUT
-        else
-          echo "No significant changes, skipping version bump"
-          echo "needs_bump=false" >> $GITHUB_OUTPUT
-        fi
+        echo "Always bump version and run release pipeline for main pushes (sync or local changes)."
+        echo "needs_bump=true" >> $GITHUB_OUTPUT
 
     - name: Get current version
       if: steps.check.outputs.needs_bump == 'true'
