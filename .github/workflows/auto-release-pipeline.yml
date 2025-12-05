@@ -222,29 +222,35 @@ jobs:
           echo "ghcr_image=${GHCR_IMAGE}"
         } >> "$GITHUB_OUTPUT"
 
+    - name: Build release notes file
+      if: steps.check.outputs.needs_bump == 'true'
+      run: |
+        cat > release-body.md <<'EOF'
+        ## 🐳 Docker 镜像
+        
+        ```bash
+        docker pull ${{ steps.image_names.outputs.docker_image }}:${{ steps.next_version.outputs.new_tag }}
+        docker pull ${{ steps.image_names.outputs.docker_image }}:latest
+        docker pull ${{ steps.image_names.outputs.ghcr_image }}:${{ steps.next_version.outputs.new_tag }}
+        docker pull ${{ steps.image_names.outputs.ghcr_image }}:latest
+        ```
+        
+        ## 📦 主要更新
+        
+        ${{ steps.changelog.outputs.content }}
+        
+        ## 📋 完整更新日志
+        
+        查看 [所有版本](https://github.com/${{ github.repository }}/releases)
+        EOF
+
     - name: Create GitHub Release
       if: steps.check.outputs.needs_bump == 'true'
       uses: softprops/action-gh-release@v1
       with:
         tag_name: ${{ steps.next_version.outputs.new_tag }}
         name: Release ${{ steps.next_version.outputs.new_version }}
-        body: |
-          ## 🐳 Docker 镜像
-          
-          ```bash
-          docker pull ${{ steps.image_names.outputs.docker_image }}:${{ steps.next_version.outputs.new_tag }}
-          docker pull ${{ steps.image_names.outputs.docker_image }}:latest
-          docker pull ${{ steps.image_names.outputs.ghcr_image }}:${{ steps.next_version.outputs.new_tag }}
-          docker pull ${{ steps.image_names.outputs.ghcr_image }}:latest
-          ```
-          
-          ## 📦 主要更新
-          
-          ${{ steps.changelog.outputs.content }}
-          
-          ## 📋 完整更新日志
-          
-          查看 [所有版本](https://github.com/${{ github.repository }}/releases)
+        body_path: release-body.md
         draft: false
         prerelease: false
         generate_release_notes: true
