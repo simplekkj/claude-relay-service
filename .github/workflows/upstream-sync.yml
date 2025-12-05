@@ -1,0 +1,128 @@
+name: Upstream Sync
+
+on:
+  schedule:
+    # 每天 04:00 UTC 执行一次（可按需调整）
+    - cron: '0 4 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  sync-upstream:
+    runs-on: ubuntu-latest
+    env:
+      DEFAULT_UPSTREAM: Wei-Shaw/claude-relay-service
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Prepare upstream repo
+        id: prepare
+        run: |
+          set -euo pipefail
+          INPUT_UPSTREAM="${{ github.event.inputs.upstream_repo || '' }}"
+          if [ -n "$INPUT_UPSTREAM" ]; then
+            echo "upstream_repo=$INPUT_UPSTREAM" >> "$GITHUB_OUTPUT"
+          else
+            echo "upstream_repo=$DEFAULT_UPSTREAM" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Sync from upstream
+        id: sync
+        env:
+          UPSTREAM_REPO: ${{ steps.prepare.outputs.upstream_repo }}
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null || \
+            git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
+
+          git fetch upstream main --prune
+
+          ORIGINAL_HEAD=$(git rev-parse HEAD)
+          STATUS=""
+          CHANGES=""
+
+          if git merge --no-ff --no-edit upstream/main; then
+            NEW_HEAD=$(git rev-parse HEAD)
+            if [ "$ORIGINAL_HEAD" = "$NEW_HEAD" ]; then
+              STATUS="up-to-date"
+              CHANGES="(no new commits)"
+            else
+              STATUS="merged"
+              CHANGES=$(git log --oneline --no-decorate "${ORIGINAL_HEAD}..${NEW_HEAD}" | head -n 20)
+            fi
+          else
+            STATUS="conflict"
+            git merge --abort || true
+            CHANGES=$(git log --oneline --no-decorate HEAD..upstream/main | head -n 20)
+          fi
+
+          {
+            echo "status=$STATUS"
+            echo "changes<<EOF"
+            echo "$CHANGES"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Push merge result
+        if: steps.sync.outputs.status == 'merged'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git push origin HEAD:main
+
+      - name: Telegram notification
+        if: (steps.sync.outputs.status == 'merged' || steps.sync.outputs.status == 'conflict') && env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != ''
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          UPSTREAM_REPO: ${{ steps.prepare.outputs.upstream_repo }}
+          STATUS: ${{ steps.sync.outputs.status }}
+          CHANGES: ${{ steps.sync.outputs.changes }}
+        run: |
+          REPO="${{ github.repository }}"
+          STATUS_ICON=""
+          STATUS_TEXT=""
+
+          case "$STATUS" in
+            merged)
+              STATUS_ICON="✅"
+              STATUS_TEXT="合并完成"
+              ;;
+            conflict)
+              STATUS_ICON="⚠️"
+              STATUS_TEXT="发生冲突，需人工处理"
+              ;;
+            *)
+              STATUS_ICON="ℹ️"
+              STATUS_TEXT="状态：$STATUS"
+              ;;
+          esac
+
+          MESSAGE="🔄 *Upstream Sync* ${STATUS_ICON}$'\n'"
+          MESSAGE+="仓库: ${REPO}$'\n'"
+          MESSAGE+="上游: ${UPSTREAM_REPO}#main$'\n'"
+          MESSAGE+="状态: ${STATUS_TEXT}$'\n'\n"
+
+          if [ "$STATUS" = "merged" ]; then
+            MESSAGE+="合入提交 (前 20 条):$'\n'\n\`\`\`\n${CHANGES}\n\`\`\`\n"
+          elif [ "$STATUS" = "conflict" ]; then
+            MESSAGE+="请手动解决冲突后推送 main 分支。上游提交 (前 20 条):$'\n'\n\`\`\`\n${CHANGES}\n\`\`\`\n"
+          fi
+
+          MESSAGE+="#upstream_sync #main"
+
+          jq -n \
+            --arg chat_id "$TELEGRAM_CHAT_ID" \
+            --arg text "$MESSAGE" \
+            '{ chat_id: $chat_id, text: $text, parse_mode: "Markdown", disable_web_page_preview: true }' | \
+          curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d @-
