@@ -390,9 +390,6 @@ const selectTheme = (mode) => {
 .theme-switch.is-auto .switch-handle {
   transform: translateY(-50%) translateX(19px);
   background: rgba(255, 255, 255, 0.25);
-  /* 降低 blur 强度，减少 GPU 负担 */
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
   border: 1px solid rgba(255, 255, 255, 0.35);
   box-shadow:
     0 4px 12px rgba(0, 0, 0, 0.1),

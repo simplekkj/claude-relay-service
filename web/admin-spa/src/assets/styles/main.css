@@ -43,28 +43,6 @@ body::before {
   z-index: -1;
 }
 
-/* 通用transition - 仅应用于特定元素 */
-body,
-div,
-button,
-input,
-select,
-textarea,
-table,
-tr,
-td,
-th,
-span,
-p,
-h1,
-h2,
-h3,
-h4,
-h5,
-h6 {
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
 /* Element Plus 主题覆盖 */
 .el-button--primary {
   background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);

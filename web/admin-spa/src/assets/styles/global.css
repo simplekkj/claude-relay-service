@@ -147,6 +147,18 @@ body::before {
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
+/* Chrome GPU 稳定性：全面禁用模糊并取消固定背景的硬件合成压力 */
+.chrome-no-blur *,
+.chrome-no-blur *::before,
+.chrome-no-blur *::after {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+.chrome-no-blur body {
+  background-attachment: scroll !important;
+}
+
 .tab-btn {
   position: relative;
   overflow: hidden;
