@@ -2020,8 +2020,8 @@ const globalRateLimit = async (req, res, next) =>
 
 // 📊 请求大小限制中间件
 const requestSizeLimit = (req, res, next) => {
-  const rawMaxSizeMb = Number.parseInt(process.env.REQUEST_MAX_SIZE_MB || '60', 10)
-  const maxSizeMb = Number.isFinite(rawMaxSizeMb) && rawMaxSizeMb > 0 ? rawMaxSizeMb : 60
+  const rawMaxSizeMb = Number.parseInt(process.env.REQUEST_MAX_SIZE_MB || '512', 10)
+  const maxSizeMb = Number.isFinite(rawMaxSizeMb) && rawMaxSizeMb > 0 ? rawMaxSizeMb : 512
   const maxSize = maxSizeMb * 1024 * 1024
   const contentLength = Number.parseInt(req.headers['content-length'] || '0', 10)
 

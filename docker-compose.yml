@@ -22,7 +22,7 @@ services:
       - HOST=0.0.0.0
       
       # 🔧 请求体大小配置
-      - REQUEST_MAX_SIZE_MB=60
+      - REQUEST_MAX_SIZE_MB=512
       
       # 🔐 安全配置（必填）
       - JWT_SECRET=${JWT_SECRET}  # 必填：至少32字符的随机字符串
