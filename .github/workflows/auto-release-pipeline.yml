@@ -82,18 +82,11 @@ jobs:
         echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
         echo "new_tag=v$NEW_VERSION" >> $GITHUB_OUTPUT
 
-    - name: Update VERSION file
+    - name: Configure git identity
       if: steps.check.outputs.needs_bump == 'true'
       run: |
-        echo "${{ steps.next_version.outputs.new_version }}" > VERSION
-        
-        # 配置git
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
-        
-        # 提交VERSION文件 - 添加 [skip ci] 以避免再次触发
-        git add VERSION
-        git commit -m "chore: sync VERSION file with release ${{ steps.next_version.outputs.new_tag }} [skip ci]"
 
     # 构建前端并推送到 web-dist 分支
     - name: Setup Node.js
@@ -203,7 +196,7 @@ jobs:
       run: |
         NEW_TAG="${{ steps.next_version.outputs.new_tag }}"
         git tag -a "$NEW_TAG" -m "Release $NEW_TAG"
-        git push origin HEAD:main "$NEW_TAG"
+        git push origin "$NEW_TAG"
 
     - name: Prepare image names
       id: image_names
