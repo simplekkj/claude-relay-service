@@ -656,15 +656,20 @@ router.post('/v1/chat/completions', authenticateApiKey, async (req, res) => {
     const duration = Date.now() - startTime
     logger.info(`OpenAI-Gemini request completed in ${duration}ms`)
   } catch (error) {
-    const statusForLog = error?.status || error?.response?.status
-    logger.error('OpenAI-Gemini request error', {
-      message: error?.message,
-      status: statusForLog,
-      code: error?.code,
-      requestUrl: error?.config?.url,
-      requestMethod: error?.config?.method,
-      upstreamTraceId: error?.response?.headers?.['x-cloudaicompanion-trace-id']
-    })
+    // 客户端主动断开连接是正常情况，使用 INFO 级别
+    if (error.message === 'Client disconnected') {
+      logger.info('🔌 OpenAI-Gemini stream ended: Client disconnected')
+    } else {
+      const statusForLog = error?.status || error?.response?.status
+      logger.error('OpenAI-Gemini request error', {
+        message: error?.message,
+        status: statusForLog,
+        code: error?.code,
+        requestUrl: error?.config?.url,
+        requestMethod: error?.config?.method,
+        upstreamTraceId: error?.response?.headers?.['x-cloudaicompanion-trace-id']
+      })
+    }
 
     // 处理速率限制
     if (error.status === 429) {
@@ -673,17 +678,24 @@ router.post('/v1/chat/completions', authenticateApiKey, async (req, res) => {
       }
     }
 
-    // 返回 OpenAI 格式的错误响应
-    const status = error.status || 500
-    const errorResponse = {
-      error: error.error || {
-        message: error.message || 'Internal server error',
-        type: 'server_error',
-        code: 'internal_error'
+    // 检查响应是否已发送（流式响应场景），避免 ERR_HTTP_HEADERS_SENT
+    if (!res.headersSent) {
+      // 客户端断开使用 499 状态码 (Client Closed Request)
+      if (error.message === 'Client disconnected') {
+        res.status(499).end()
+      } else {
+        // 返回 OpenAI 格式的错误响应
+        const status = error.status || 500
+        const errorResponse = {
+          error: error.error || {
+            message: error.message || 'Internal server error',
+            type: 'server_error',
+            code: 'internal_error'
+          }
+        }
+        res.status(status).json(errorResponse)
       }
     }
-
-    res.status(status).json(errorResponse)
   } finally {
     // 清理资源
     if (abortController) {
