@@ -656,20 +656,15 @@ router.post('/v1/chat/completions', authenticateApiKey, async (req, res) => {
     const duration = Date.now() - startTime
     logger.info(`OpenAI-Gemini request completed in ${duration}ms`)
   } catch (error) {
-    // 客户端主动断开连接是正常情况，使用 INFO 级别
-    if (error.message === 'Client disconnected') {
-      logger.info('🔌 OpenAI-Gemini stream ended: Client disconnected')
-    } else {
-      const statusForLog = error?.status || error?.response?.status
-      logger.error('OpenAI-Gemini request error', {
-        message: error?.message,
-        status: statusForLog,
-        code: error?.code,
-        requestUrl: error?.config?.url,
-        requestMethod: error?.config?.method,
-        upstreamTraceId: error?.response?.headers?.['x-cloudaicompanion-trace-id']
-      })
-    }
+    const statusForLog = error?.status || error?.response?.status
+    logger.error('OpenAI-Gemini request error', {
+      message: error?.message,
+      status: statusForLog,
+      code: error?.code,
+      requestUrl: error?.config?.url,
+      requestMethod: error?.config?.method,
+      upstreamTraceId: error?.response?.headers?.['x-cloudaicompanion-trace-id']
+    })
 
     // 处理速率限制
     if (error.status === 429) {
@@ -705,8 +700,8 @@ router.post('/v1/chat/completions', authenticateApiKey, async (req, res) => {
   return undefined
 })
 
-// OpenAI 兼容的模型列表端点
-router.get('/v1/models', authenticateApiKey, async (req, res) => {
+// 获取可用模型列表的共享处理器
+async function handleGetModels(req, res) {
   try {
     const apiKeyData = req.apiKey
 
@@ -794,8 +789,13 @@ router.get('/v1/models', authenticateApiKey, async (req, res) => {
       }
     })
   }
-  return undefined
-})
+}
+
+// OpenAI 兼容的模型列表端点 (带 v1 版)
+router.get('/v1/models', authenticateApiKey, handleGetModels)
+
+// OpenAI 兼容的模型列表端点 (根路径版，方便第三方加载)
+router.get('/models', authenticateApiKey, handleGetModels)
 
 // OpenAI 兼容的模型详情端点
 router.get('/v1/models/:model', authenticateApiKey, async (req, res) => {

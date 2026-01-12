@@ -122,6 +122,21 @@ async function handleMessagesRequest(req, res) {
   try {
     const startTime = Date.now()
 
+    const forcedVendor = req._anthropicVendor || null
+    const requiredService =
+      forcedVendor === 'gemini-cli' || forcedVendor === 'antigravity' ? 'gemini' : 'claude'
+
+    if (!apiKeyService.hasPermission(req.apiKey?.permissions, requiredService)) {
+      return res.status(403).json({
+        error: {
+          type: 'permission_error',
+          message:
+            requiredService === 'gemini'
+              ? '此 API Key 无权访问 Gemini 服务'
+              : '此 API Key 无权访问 Claude 服务'
+        }
+      })
+    }
     // 🔄 并发满额重试标志：最多重试一次（使用req对象存储状态）
     if (req._concurrencyRetryAttempted === undefined) {
       req._concurrencyRetryAttempted = false
@@ -166,7 +181,6 @@ async function handleMessagesRequest(req, res) {
       }
     }
 
-    const forcedVendor = req._anthropicVendor || null
     logger.api('📥 /v1/messages request received', {
       model: req.body.model || null,
       forcedVendor,
@@ -182,27 +196,8 @@ async function handleMessagesRequest(req, res) {
 
     // /v1/messages 的扩展：按路径强制分流到 Gemini OAuth 账户（避免 model 前缀混乱）
     if (forcedVendor === 'gemini-cli' || forcedVendor === 'antigravity') {
-      if (!apiKeyService.hasPermission(req.apiKey?.permissions, 'gemini')) {
-        return res.status(403).json({
-          error: {
-            type: 'permission_error',
-            message: '此 API Key 无权访问 Gemini 服务'
-          }
-        })
-      }
-
       const baseModel = (req.body.model || '').trim()
       return await handleAnthropicMessagesToGemini(req, res, { vendor: forcedVendor, baseModel })
-    }
-
-    // Claude 服务权限校验，阻止未授权的 Key（默认路径保持不变）
-    if (!apiKeyService.hasPermission(req.apiKey.permissions, 'claude')) {
-      return res.status(403).json({
-        error: {
-          type: 'permission_error',
-          message: '此 API Key 无权访问 Claude 服务'
-        }
-      })
     }
 
     // 检查是否为流式请求
@@ -1428,27 +1423,23 @@ router.get('/v1/organizations/:org_id/usage', authenticateApiKey, async (req, re
 router.post('/v1/messages/count_tokens', authenticateApiKey, async (req, res) => {
   // 按路径强制分流到 Gemini OAuth 账户（避免 model 前缀混乱）
   const forcedVendor = req._anthropicVendor || null
-  if (forcedVendor === 'gemini-cli' || forcedVendor === 'antigravity') {
-    if (!apiKeyService.hasPermission(req.apiKey?.permissions, 'gemini')) {
-      return res.status(403).json({
-        error: {
-          type: 'permission_error',
-          message: 'This API key does not have permission to access Gemini'
-        }
-      })
-    }
+  const requiredService =
+    forcedVendor === 'gemini-cli' || forcedVendor === 'antigravity' ? 'gemini' : 'claude'
 
-    return await handleAnthropicCountTokensToGemini(req, res, { vendor: forcedVendor })
-  }
-
-  // 检查权限
-  if (!apiKeyService.hasPermission(req.apiKey.permissions, 'claude')) {
+  if (!apiKeyService.hasPermission(req.apiKey?.permissions, requiredService)) {
     return res.status(403).json({
       error: {
         type: 'permission_error',
-        message: 'This API key does not have permission to access Claude'
+        message:
+          requiredService === 'gemini'
+            ? 'This API key does not have permission to access Gemini'
+            : 'This API key does not have permission to access Claude'
       }
     })
+  }
+
+  if (requiredService === 'gemini') {
+    return await handleAnthropicCountTokensToGemini(req, res, { vendor: forcedVendor })
   }
 
   // 🔗 会话绑定验证（与 messages 端点保持一致）

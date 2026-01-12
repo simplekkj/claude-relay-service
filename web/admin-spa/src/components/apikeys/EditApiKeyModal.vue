@@ -1233,67 +1233,28 @@ onMounted(async () => {
   form.totalCostLimit = props.apiKey.totalCostLimit || ''
   form.weeklyOpusCostLimit = props.apiKey.weeklyOpusCostLimit || ''
   // 处理权限数据，兼容旧格式（字符串）和新格式（数组）
-  const perms = props.apiKey.permissions
-  if (Array.isArray(perms)) {
-    // 过滤掉损坏的数据（如 "claude,droid" 这种逗号分隔的字符串）
-    const validPerms = ['claude', 'gemini', 'openai', 'droid']
-    const cleaned = []
-    for (const p of perms) {
-      if (validPerms.includes(p)) {
-        cleaned.push(p)
-      } else if (typeof p === 'string' && p.includes(',')) {
-        // 处理逗号分隔的旧格式
-        const parts = p.split(',').map((s) => s.trim())
-        for (const part of parts) {
-          if (validPerms.includes(part) && !cleaned.includes(part)) {
-            cleaned.push(part)
-          }
-        }
-      }
-    }
-    form.permissions = cleaned
-  } else if (perms === 'all' || !perms) {
-    form.permissions = []
-  } else if (typeof perms === 'string') {
-    // 尝试解析 JSON 数组字符串（如 "[]" 或 '["claude","gemini"]'）
-    if (perms.startsWith('[')) {
+  // 有效的权限值
+  const VALID_PERMS = ['claude', 'gemini', 'openai', 'droid']
+  let perms = props.apiKey.permissions
+  // 如果是字符串，尝试 JSON.parse（Redis 可能返回 "[]" 或 "[\"gemini\"]"）
+  if (typeof perms === 'string') {
+    if (perms === 'all' || perms === '') {
+      perms = []
+    } else if (perms.startsWith('[')) {
       try {
-        const parsed = JSON.parse(perms)
-        if (Array.isArray(parsed)) {
-          // 递归处理解析后的数组
-          const validPerms = ['claude', 'gemini', 'openai', 'droid']
-          const cleaned = []
-          for (const p of parsed) {
-            if (validPerms.includes(p)) {
-              cleaned.push(p)
-            } else if (typeof p === 'string' && p.includes(',')) {
-              const parts = p.split(',').map((s) => s.trim())
-              for (const part of parts) {
-                if (validPerms.includes(part) && !cleaned.includes(part)) {
-                  cleaned.push(part)
-                }
-              }
-            }
-          }
-          form.permissions = cleaned
-        } else {
-          form.permissions = []
-        }
-      } catch (e) {
-        // 解析失败，尝试按逗号分隔处理
-        const validPerms = ['claude', 'gemini', 'openai', 'droid']
-        const parts = perms.split(',').map((s) => s.trim())
-        form.permissions = parts.filter((p) => validPerms.includes(p))
+        perms = JSON.parse(perms)
+      } catch {
+        perms = VALID_PERMS.includes(perms) ? [perms] : []
       }
-    } else if (perms.includes(',')) {
-      // 逗号分隔的旧格式
-      const validPerms = ['claude', 'gemini', 'openai', 'droid']
-      const parts = perms.split(',').map((s) => s.trim())
-      form.permissions = parts.filter((p) => validPerms.includes(p))
+    } else if (VALID_PERMS.includes(perms)) {
+      perms = [perms]
     } else {
-      const validPerms = ['claude', 'gemini', 'openai', 'droid']
-      form.permissions = validPerms.includes(perms) ? [perms] : []
+      perms = []
     }
+  }
+  if (Array.isArray(perms)) {
+    // 过滤掉无效值（如 "[]"）
+    form.permissions = perms.filter((p) => VALID_PERMS.includes(p))
   } else {
     form.permissions = []
   }
