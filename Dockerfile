@@ -4,12 +4,15 @@ FROM node:18-alpine AS backend-deps
 # 📁 设置工作目录
 WORKDIR /app
 
+# 🔧 安装构建依赖（仅构建阶段使用）
+RUN apk add --no-cache python3 make g++
+
 # 📦 复制 package 文件
 COPY package*.json ./
 
 # 🔽 安装依赖 (生产环境) - 使用 BuildKit 缓存加速
 RUN --mount=type=cache,target=/root/.npm \
-    npm ci --only=production
+    npm ci --omit=dev
 
 # 🎯 前端构建阶段 (与后端依赖并行)
 FROM node:18-alpine AS frontend-builder
