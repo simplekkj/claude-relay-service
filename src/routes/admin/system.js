@@ -294,7 +294,31 @@ async function getOemSettings() {
 // 注意：这个端点没有 authenticateAdmin 中间件，因为前端登录页也需要访问
 router.get('/oem-settings', async (req, res) => {
   try {
-    const settings = await getOemSettings()
+    const client = redis.getClient()
+    const oemSettings = await client.get('oem:settings')
+
+    // 默认设置
+    const defaultSettings = {
+      siteName: 'Claude Relay Service',
+      siteIcon: '',
+      siteIconData: '', // Base64编码的图标数据
+      showAdminButton: true, // 是否显示管理后台按钮
+      apiStatsNotice: {
+        enabled: false,
+        title: '',
+        content: ''
+      },
+      updatedAt: new Date().toISOString()
+    }
+
+    let settings = defaultSettings
+    if (oemSettings) {
+      try {
+        settings = { ...defaultSettings, ...JSON.parse(oemSettings) }
+      } catch (err) {
+        logger.warn('⚠️ Failed to parse OEM settings, using defaults:', err.message)
+      }
+    }
 
     // 添加 LDAP 启用状态到响应中
     return res.json({
@@ -313,18 +337,7 @@ router.get('/oem-settings', async (req, res) => {
 // 更新OEM设置
 router.put('/oem-settings', authenticateAdmin, async (req, res) => {
   try {
-    const {
-      siteName,
-      siteIcon,
-      siteIconData,
-      showAdminButton,
-      publicStatsEnabled,
-      publicStatsShowModelDistribution,
-      publicStatsModelDistributionPeriod,
-      publicStatsShowTokenTrends,
-      publicStatsShowApiKeysTrends,
-      publicStatsShowAccountTrends
-    } = req.body
+    const { siteName, siteIcon, siteIconData, showAdminButton, apiStatsNotice } = req.body
 
     // 验证输入
     if (!siteName || typeof siteName !== 'string' || siteName.trim().length === 0) {
@@ -362,13 +375,11 @@ router.put('/oem-settings', authenticateAdmin, async (req, res) => {
       siteIcon: (siteIcon || '').trim(),
       siteIconData: (siteIconData || '').trim(), // Base64数据
       showAdminButton: showAdminButton !== false, // 默认为true
-      publicStatsEnabled: publicStatsEnabled === true, // 默认为false
-      // 公开统计显示选项
-      publicStatsShowModelDistribution: publicStatsShowModelDistribution !== false, // 默认为true
-      publicStatsModelDistributionPeriod: periodValue, // 时间范围
-      publicStatsShowTokenTrends: publicStatsShowTokenTrends === true, // 默认为false
-      publicStatsShowApiKeysTrends: publicStatsShowApiKeysTrends === true, // 默认为false
-      publicStatsShowAccountTrends: publicStatsShowAccountTrends === true, // 默认为false
+      apiStatsNotice: {
+        enabled: apiStatsNotice?.enabled === true,
+        title: (apiStatsNotice?.title || '').trim().slice(0, 100),
+        content: (apiStatsNotice?.content || '').trim().slice(0, 2000)
+      },
       updatedAt: new Date().toISOString()
     }
 
