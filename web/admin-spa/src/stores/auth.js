@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import router from '@/router'
 
+import request from '@/utils/request'
 import { loginApi, getAuthUserApi, getOemSettingsApi } from '@/utils/http_apis'
 
 export const useAuthStore = defineStore('auth', () => {
@@ -117,7 +118,7 @@ export const useAuthStore = defineStore('auth', () => {
   async function loadPublicStats() {
     publicStatsLoading.value = true
     try {
-      const result = await apiClient.get('/admin/public-stats')
+      const result = await request({ url: '/admin/public-stats', method: 'GET' })
       if (result.success && result.enabled && result.data) {
         publicStats.value = result.data
       } else {

@@ -1817,15 +1817,6 @@ defineOptions({
 const settingsStore = useSettingsStore()
 const { loading, saving, oemSettings } = storeToRefs(settingsStore)
 
-// 模型使用分布时间范围选项
-const modelDistributionPeriodOptions = [
-  { value: 'today', label: '今天' },
-  { value: '24h', label: '24小时' },
-  { value: '7d', label: '7天' },
-  { value: '30d', label: '30天' },
-  { value: 'all', label: '全部' }
-]
-
 // 组件refs
 const iconFileInput = ref()
 
