@@ -1046,6 +1046,7 @@ router.post('/api-keys/batch-stats', authenticateAdmin, async (req, res) => {
             cost: 0,
             formattedCost: '$0.00',
             dailyCost: 0,
+            weeklyOpusCost: 0,
             currentWindowCost: 0,
             windowRemainingSeconds: null,
             allTimeCost: 0,
@@ -1126,6 +1127,7 @@ async function calculateKeyStats(keyId, timeRange, startDate, endDate) {
 
   // 获取实时限制数据（窗口数据不受时间范围筛选影响，始终获取当前窗口状态）
   let dailyCost = 0
+  let weeklyOpusCost = 0 // 字段名沿用 weeklyOpusCost*，语义为“Claude 周费用”
   let currentWindowCost = 0
   let windowRemainingSeconds = null
   let windowStartTime = null
@@ -1138,6 +1140,7 @@ async function calculateKeyStats(keyId, timeRange, startDate, endDate) {
     const rateLimitWindow = parseInt(apiKey?.rateLimitWindow) || 0
     const dailyCostLimit = parseFloat(apiKey?.dailyCostLimit) || 0
     const totalCostLimit = parseFloat(apiKey?.totalCostLimit) || 0
+    const weeklyOpusCostLimit = parseFloat(apiKey?.weeklyOpusCostLimit) || 0
 
     // 只在启用了每日费用限制时查询
     if (dailyCostLimit > 0) {
@@ -1148,6 +1151,11 @@ async function calculateKeyStats(keyId, timeRange, startDate, endDate) {
     if (totalCostLimit > 0) {
       const totalCostKey = `usage:cost:total:${keyId}`
       allTimeCost = parseFloat((await client.get(totalCostKey)) || '0')
+    }
+
+    // 只在启用了 Claude 周费用限制时查询（字段名沿用 weeklyOpusCostLimit）
+    if (weeklyOpusCostLimit > 0) {
+      weeklyOpusCost = await redis.getWeeklyOpusCost(keyId)
     }
 
     // 🔧 FIX: 对于 "全部时间" 时间范围，直接使用 allTimeCost
@@ -1166,6 +1174,7 @@ async function calculateKeyStats(keyId, timeRange, startDate, endDate) {
         formattedCost: CostCalculator.formatCost(allTimeCost),
         // 实时限制数据（始终返回，不受时间范围影响）
         dailyCost,
+        weeklyOpusCost,
         currentWindowCost,
         windowRemainingSeconds,
         windowStartTime,
@@ -1216,6 +1225,7 @@ async function calculateKeyStats(keyId, timeRange, startDate, endDate) {
       formattedCost: '$0.00',
       // 实时限制数据（始终返回，不受时间范围影响）
       dailyCost,
+      weeklyOpusCost,
       currentWindowCost,
       windowRemainingSeconds,
       windowStartTime,
@@ -1334,6 +1344,7 @@ async function calculateKeyStats(keyId, timeRange, startDate, endDate) {
     formattedCost: CostCalculator.formatCost(totalCost),
     // 实时限制数据
     dailyCost,
+    weeklyOpusCost,
     currentWindowCost,
     windowRemainingSeconds,
     windowStartTime,
