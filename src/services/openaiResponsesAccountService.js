@@ -1,9 +1,11 @@
 const { v4: uuidv4 } = require('uuid')
 const crypto = require('crypto')
+const axios = require('axios')
 const redis = require('../models/redis')
 const logger = require('../utils/logger')
 const config = require('../../config/config')
 const LRUCache = require('../utils/lruCache')
+const ProxyHelper = require('../utils/proxyHelper')
 
 class OpenAIResponsesAccountService {
   constructor() {
@@ -14,12 +16,14 @@ class OpenAIResponsesAccountService {
     // Redis 键前缀
     this.ACCOUNT_KEY_PREFIX = 'openai_responses_account:'
     this.SHARED_ACCOUNTS_KEY = 'shared_openai_responses_accounts'
+    this.MODELS_CACHE_KEY_PREFIX = 'openai_responses_models_cache:'
 
     // 🚀 性能优化：缓存派生的加密密钥，避免每次重复计算
     this._encryptionKeyCache = null
 
     // 🔄 解密结果缓存，提高解密性能
     this._decryptCache = new LRUCache(500)
+    this._modelsRequestTimeout = 30000
 
     // 🧹 定期清理缓存（每10分钟）
     setInterval(
@@ -258,6 +262,75 @@ class OpenAIResponsesAccountService {
     })
 
     return accounts
+  }
+
+  // 🔗 拉取账户可用模型（带缓存）
+  async fetchAvailableModels(accountId, options = {}) {
+    const { forceRefresh = false, ttlSeconds = 600 } = options
+    const cacheTtlSeconds = Number.isFinite(Number(ttlSeconds))
+      ? Math.max(1, Math.floor(Number(ttlSeconds)))
+      : 600
+
+    try {
+      if (!forceRefresh) {
+        const cachedModels = await this._getCachedModels(accountId)
+        if (Array.isArray(cachedModels) && cachedModels.length > 0) {
+          return cachedModels
+        }
+      }
+
+      const account = await this.getAccount(accountId)
+      if (!account) {
+        throw new Error('Account not found')
+      }
+
+      const modelsUrl = this._buildModelsUrl(account.baseApi)
+      const requestOptions = {
+        method: 'GET',
+        url: modelsUrl,
+        timeout: this._modelsRequestTimeout,
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${account.apiKey}`
+        },
+        validateStatus: () => true
+      }
+
+      if (account.proxy) {
+        const proxyAgent = ProxyHelper.createProxyAgent(account.proxy)
+        if (proxyAgent) {
+          requestOptions.httpAgent = proxyAgent
+          requestOptions.httpsAgent = proxyAgent
+          requestOptions.proxy = false
+        }
+      }
+
+      const response = await axios(requestOptions)
+      if (response.status < 200 || response.status >= 300) {
+        throw new Error(`Models endpoint responded with status ${response.status}`)
+      }
+
+      const models = this._normalizeModelsResponse(response.data)
+      if (models.length === 0) {
+        throw new Error('No model ids found in upstream response')
+      }
+
+      await this._setCachedModels(accountId, models, cacheTtlSeconds)
+      return models
+    } catch (error) {
+      logger.warn(
+        `⚠️ Failed to fetch OpenAI-Responses models for account ${accountId}:`,
+        error.message
+      )
+
+      const cachedModels = await this._getCachedModels(accountId)
+      if (Array.isArray(cachedModels) && cachedModels.length > 0) {
+        logger.info(`📦 Using cached OpenAI-Responses models for account ${accountId}`)
+        return cachedModels
+      }
+
+      throw error
+    }
   }
 
   // 标记账户限流
@@ -544,6 +617,91 @@ class OpenAIResponsesAccountService {
       remainingMinutes,
       willBeAvailableAt
     }
+  }
+
+  _buildModelsUrl(baseApi) {
+    const normalized = String(baseApi || '')
+      .trim()
+      .replace(/\/+$/, '')
+    if (!normalized) {
+      throw new Error('Account baseApi is empty')
+    }
+
+    if (normalized.endsWith('/v1')) {
+      return `${normalized}/models`
+    }
+
+    return `${normalized}/v1/models`
+  }
+
+  _normalizeModelsResponse(payload) {
+    const candidates = []
+
+    if (Array.isArray(payload?.data)) {
+      candidates.push(...payload.data)
+    }
+
+    if (Array.isArray(payload?.models)) {
+      candidates.push(...payload.models)
+    } else if (payload?.models && typeof payload.models === 'object') {
+      for (const modelId of Object.keys(payload.models)) {
+        candidates.push({ id: modelId })
+      }
+    }
+
+    const uniqueIds = new Set()
+    for (const item of candidates) {
+      const modelId =
+        typeof item === 'string'
+          ? item
+          : typeof item?.id === 'string'
+            ? item.id
+            : typeof item?.name === 'string'
+              ? item.name
+              : ''
+      const normalizedId = String(modelId || '').trim()
+      if (!normalizedId) {
+        continue
+      }
+      uniqueIds.add(normalizedId)
+    }
+
+    return Array.from(uniqueIds)
+      .sort((a, b) => a.localeCompare(b))
+      .map((id) => ({
+        value: id,
+        label: id
+      }))
+  }
+
+  async _getCachedModels(accountId) {
+    const client = redis.getClientSafe()
+    const cacheKey = `${this.MODELS_CACHE_KEY_PREFIX}${accountId}`
+    const raw = await client.get(cacheKey)
+    if (!raw) {
+      return null
+    }
+
+    try {
+      const parsed = JSON.parse(raw)
+      if (Array.isArray(parsed?.models)) {
+        return parsed.models
+      }
+    } catch (error) {
+      logger.warn(`⚠️ Failed to parse cached models for account ${accountId}:`, error.message)
+    }
+
+    return null
+  }
+
+  async _setCachedModels(accountId, models, ttlSeconds) {
+    const client = redis.getClientSafe()
+    const cacheKey = `${this.MODELS_CACHE_KEY_PREFIX}${accountId}`
+    const payload = JSON.stringify({
+      models,
+      updatedAt: new Date().toISOString()
+    })
+    await client.setex(cacheKey, ttlSeconds, payload)
   }
 
   // 加密敏感数据

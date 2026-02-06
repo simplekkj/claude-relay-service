@@ -60,7 +60,7 @@ class OpenAIResponsesRelayService {
   }
 
   // 处理请求转发
-  async handleRequest(req, res, account, apiKeyData) {
+  async handleRequest(req, res, account, apiKeyData, options = {}) {
     let abortController = null
     // 获取会话哈希（如果有的话）
     const sessionId = req.headers['session_id'] || req.body?.session_id
@@ -159,6 +159,18 @@ class OpenAIResponsesRelayService {
           req.body?.stream,
           sessionHash
         )
+
+        if (options.captureRateLimitOnly) {
+          req.removeListener('close', handleClientDisconnect)
+          res.removeListener('close', handleClientDisconnect)
+          return {
+            handled: false,
+            status: 429,
+            rateLimited: true,
+            resetsInSeconds,
+            errorData
+          }
+        }
 
         // 返回错误响应（使用处理后的数据，避免循环引用）
         const errorResponse = errorData || {

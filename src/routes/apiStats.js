@@ -5,6 +5,7 @@ const apiKeyService = require('../services/apiKeyService')
 const CostCalculator = require('../utils/costCalculator')
 const claudeAccountService = require('../services/claudeAccountService')
 const openaiAccountService = require('../services/openaiAccountService')
+const openaiResponsesAccountService = require('../services/openaiResponsesAccountService')
 const serviceRatesService = require('../services/serviceRatesService')
 const { createClaudeTestPayload } = require('../utils/testPayloadHelper')
 const modelsConfig = require('../../config/models')
@@ -13,12 +14,51 @@ const { getSafeMessage } = require('../utils/errorSanitizer')
 const router = express.Router()
 
 // 📋 获取可用模型列表（公开接口）
-router.get('/models', (req, res) => {
+router.get('/models', async (req, res) => {
   const { service } = req.query
+  const forceRefresh = req.query.forceRefresh === '1' || req.query.forceRefresh === 'true'
+
+  const getOpenAIModels = async () => {
+    try {
+      const accounts = await openaiResponsesAccountService.getAllAccounts()
+      if (!Array.isArray(accounts) || accounts.length === 0) {
+        return modelsConfig.OPENAI_MODELS
+      }
+
+      for (const account of accounts) {
+        if (!account?.id) {
+          continue
+        }
+
+        try {
+          const dynamicModels = await openaiResponsesAccountService.fetchAvailableModels(
+            account.id,
+            {
+              forceRefresh
+            }
+          )
+          if (Array.isArray(dynamicModels) && dynamicModels.length > 0) {
+            return dynamicModels
+          }
+        } catch (error) {
+          logger.warn(
+            `⚠️ Failed to fetch dynamic OpenAI models via OpenAI-Responses account ${account.id}:`,
+            error.message
+          )
+        }
+      }
+    } catch (error) {
+      logger.warn('⚠️ Failed to load OpenAI-Responses accounts for dynamic models:', error.message)
+    }
+
+    return modelsConfig.OPENAI_MODELS
+  }
+
+  const openaiModels = await getOpenAIModels()
 
   if (service) {
     // 返回指定服务的模型
-    const models = modelsConfig.getModelsByService(service)
+    const models = service === 'openai' ? openaiModels : modelsConfig.getModelsByService(service)
     return res.json({
       success: true,
       data: models
@@ -31,9 +71,14 @@ router.get('/models', (req, res) => {
     data: {
       claude: modelsConfig.CLAUDE_MODELS,
       gemini: modelsConfig.GEMINI_MODELS,
-      openai: modelsConfig.OPENAI_MODELS,
+      openai: openaiModels,
       other: modelsConfig.OTHER_MODELS,
-      all: modelsConfig.getAllModels()
+      all: [
+        ...modelsConfig.CLAUDE_MODELS,
+        ...modelsConfig.GEMINI_MODELS,
+        ...openaiModels,
+        ...modelsConfig.OTHER_MODELS
+      ]
     }
   })
 })

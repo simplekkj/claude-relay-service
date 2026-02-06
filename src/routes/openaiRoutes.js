@@ -16,6 +16,15 @@ const { updateRateLimitCounters } = require('../utils/rateLimitHelper')
 const { IncrementalSSEParser } = require('../utils/sseParser')
 const { getSafeMessage } = require('../utils/errorSanitizer')
 
+const DEFAULT_429_FAILOVER_ATTEMPTS = 3
+const MAX_429_FAILOVER_ATTEMPTS = (() => {
+  const raw = Number(config.openai?.max429FailoverAttempts)
+  if (!Number.isFinite(raw)) {
+    return DEFAULT_429_FAILOVER_ATTEMPTS
+  }
+  return Math.max(1, Math.floor(raw))
+})()
+
 // 创建代理 Agent（使用统一的代理工具）
 function createProxyAgent(proxy) {
   return ProxyHelper.createProxyAgent(proxy)
@@ -68,6 +77,74 @@ function extractCodexUsageHeaders(headers) {
 
   const hasData = Object.values(snapshot).some((value) => value !== null)
   return hasData ? snapshot : null
+}
+
+async function parseRateLimitError(upstream, isStream) {
+  let resetsInSeconds = null
+  let errorData = null
+
+  try {
+    if (isStream && upstream.data && typeof upstream.data.on === 'function') {
+      const chunks = []
+      await new Promise((resolve, reject) => {
+        upstream.data.on('data', (chunk) => chunks.push(chunk))
+        upstream.data.on('end', resolve)
+        upstream.data.on('error', reject)
+        setTimeout(resolve, 5000)
+      })
+
+      const fullResponse = Buffer.concat(chunks).toString()
+      try {
+        errorData = JSON.parse(fullResponse)
+      } catch (e) {
+        logger.error('Failed to parse 429 error response:', e)
+        logger.debug('Raw response:', fullResponse)
+      }
+    } else {
+      errorData = upstream.data
+    }
+
+    if (errorData && errorData.error && errorData.error.resets_in_seconds) {
+      resetsInSeconds = errorData.error.resets_in_seconds
+      logger.info(
+        `🕐 Codex rate limit will reset in ${resetsInSeconds} seconds (${Math.ceil(resetsInSeconds / 60)} minutes / ${Math.ceil(resetsInSeconds / 3600)} hours)`
+      )
+    } else {
+      logger.warn(
+        '⚠️ Could not extract resets_in_seconds from 429 response, using default 60 minutes'
+      )
+    }
+  } catch (error) {
+    logger.error('⚠️ Failed to parse rate limit error:', error)
+  }
+
+  return { resetsInSeconds, errorData }
+}
+
+function createRateLimitErrorResponse(errorData, resetsInSeconds) {
+  return (
+    errorData || {
+      error: {
+        type: 'usage_limit_reached',
+        message: 'The usage limit has been reached',
+        resets_in_seconds: resetsInSeconds
+      }
+    }
+  )
+}
+
+function sendRateLimitResponse(res, isStream, errorResponse) {
+  if (isStream) {
+    res.status(429)
+    res.setHeader('Content-Type', 'text/event-stream')
+    res.setHeader('Cache-Control', 'no-cache')
+    res.setHeader('Connection', 'keep-alive')
+    res.write(`data: ${JSON.stringify(errorResponse)}\n\n`)
+    res.end()
+    return
+  }
+
+  res.status(429).json(errorResponse)
 }
 
 async function applyRateLimitTracking(req, usageSummary, model, context = '', accountType = null) {
@@ -297,142 +374,153 @@ const handleResponses = async (req, res) => {
       logger.info('✅ Codex CLI request detected, forwarding as-is')
     }
 
-    // 使用调度器选择账户
-    ;({ accessToken, accountId, accountType, proxy, account } = await getOpenAIAuthToken(
-      apiKeyData,
-      sessionId,
-      requestedModel
-    ))
+    const hasDedicatedBinding =
+      typeof apiKeyData.openaiAccountId === 'string' &&
+      apiKeyData.openaiAccountId.length > 0 &&
+      !apiKeyData.openaiAccountId.startsWith('group:')
+    const triedAccounts = new Set()
+    let lastRateLimitResult = null
+    let failoverCount = 0
+    let authContext = await getOpenAIAuthToken(apiKeyData, sessionId, requestedModel)
 
-    // 如果是 OpenAI-Responses 账户，使用专门的中继服务处理
-    if (accountType === 'openai-responses') {
-      logger.info(`🔀 Using OpenAI-Responses relay service for account: ${account.name}`)
-      return await openaiResponsesRelayService.handleRequest(req, res, account, apiKeyData)
-    }
     // 基于白名单构造上游所需的请求头，确保键为小写且值受控
     const incoming = req.headers || {}
 
     const allowedKeys = ['version', 'openai-beta', 'session_id']
-
-    const headers = {}
-    for (const key of allowedKeys) {
-      if (incoming[key] !== undefined) {
-        headers[key] = incoming[key]
-      }
-    }
 
     // 判断是否访问 compact 端点
     const isCompactRoute =
       req.path === '/responses/compact' ||
       req.path === '/v1/responses/compact' ||
       (req.originalUrl && req.originalUrl.includes('/responses/compact'))
-
-    // 覆盖或新增必要头部
-    headers['authorization'] = `Bearer ${accessToken}`
-    headers['chatgpt-account-id'] = account.accountId || account.chatgptUserId || accountId
-    headers['host'] = 'chatgpt.com'
-    headers['accept'] = isStream ? 'text/event-stream' : 'application/json'
-    headers['content-type'] = 'application/json'
     if (!isCompactRoute) {
       req.body['store'] = false
     } else if (req.body && Object.prototype.hasOwnProperty.call(req.body, 'store')) {
       delete req.body['store']
     }
 
-    // 创建代理 agent
-    const proxyAgent = createProxyAgent(proxy)
-
-    // 配置请求选项
-    const axiosConfig = {
-      headers,
-      timeout: config.requestTimeout || 600000,
-      validateStatus: () => true
-    }
-
-    // 如果有代理，添加代理配置
-    if (proxyAgent) {
-      axiosConfig.httpAgent = proxyAgent
-      axiosConfig.httpsAgent = proxyAgent
-      axiosConfig.proxy = false
-      logger.info(`🌐 Using proxy for OpenAI request: ${ProxyHelper.getProxyDescription(proxy)}`)
-    } else {
-      logger.debug('🌐 No proxy configured for OpenAI request')
-    }
-
     const codexEndpoint = isCompactRoute
       ? 'https://chatgpt.com/backend-api/codex/responses/compact'
       : 'https://chatgpt.com/backend-api/codex/responses'
 
-    // 根据 stream 参数决定请求类型
-    if (isStream) {
-      // 流式请求
-      upstream = await axios.post(codexEndpoint, req.body, {
-        ...axiosConfig,
-        responseType: 'stream'
-      })
-    } else {
-      // 非流式请求
-      upstream = await axios.post(codexEndpoint, req.body, axiosConfig)
-    }
+    for (;;) {
+      ;({ accessToken, accountId, accountType, proxy, account } = authContext)
+      const accountKey = `${accountType}:${accountId}`
 
-    const codexUsageSnapshot = extractCodexUsageHeaders(upstream.headers)
-    if (codexUsageSnapshot) {
-      try {
-        await openaiAccountService.updateCodexUsageSnapshot(accountId, codexUsageSnapshot)
-      } catch (codexError) {
-        logger.error('⚠️ 更新 Codex 使用统计失败:', codexError)
+      if (triedAccounts.has(accountKey) && lastRateLimitResult) {
+        const errorResponse = createRateLimitErrorResponse(
+          lastRateLimitResult.errorData,
+          lastRateLimitResult.resetsInSeconds
+        )
+        sendRateLimitResponse(res, isStream, errorResponse)
+        return
       }
-    }
 
-    // 处理 429 限流错误
-    if (upstream.status === 429) {
+      triedAccounts.add(accountKey)
+
+      if (accountType === 'openai-responses') {
+        logger.info(`🔀 Using OpenAI-Responses relay service for account: ${account.name}`)
+        const relayResult = await openaiResponsesRelayService.handleRequest(
+          req,
+          res,
+          account,
+          apiKeyData,
+          {
+            captureRateLimitOnly: true
+          }
+        )
+
+        if (relayResult?.rateLimited) {
+          lastRateLimitResult = {
+            resetsInSeconds: relayResult.resetsInSeconds,
+            errorData: relayResult.errorData
+          }
+          failoverCount += 1
+
+          if (hasDedicatedBinding || failoverCount >= MAX_429_FAILOVER_ATTEMPTS) {
+            const errorResponse = createRateLimitErrorResponse(
+              relayResult.errorData,
+              relayResult.resetsInSeconds
+            )
+            sendRateLimitResponse(res, isStream, errorResponse)
+            return
+          }
+
+          try {
+            authContext = await getOpenAIAuthToken(apiKeyData, sessionId, requestedModel)
+          } catch (selectionError) {
+            logger.warn(
+              '⚠️ Failed to select fallback OpenAI account after OpenAI-Responses 429:',
+              selectionError.message
+            )
+            const errorResponse = createRateLimitErrorResponse(
+              relayResult.errorData,
+              relayResult.resetsInSeconds
+            )
+            sendRateLimitResponse(res, isStream, errorResponse)
+            return
+          }
+
+          continue
+        }
+
+        return relayResult
+      }
+
+      const headers = {}
+      for (const key of allowedKeys) {
+        if (incoming[key] !== undefined) {
+          headers[key] = incoming[key]
+        }
+      }
+
+      headers['authorization'] = `Bearer ${accessToken}`
+      headers['chatgpt-account-id'] = account.accountId || account.chatgptUserId || accountId
+      headers['host'] = 'chatgpt.com'
+      headers['accept'] = isStream ? 'text/event-stream' : 'application/json'
+      headers['content-type'] = 'application/json'
+
+      const proxyAgent = createProxyAgent(proxy)
+      const axiosConfig = {
+        headers,
+        timeout: config.requestTimeout || 600000,
+        validateStatus: () => true
+      }
+
+      if (proxyAgent) {
+        axiosConfig.httpAgent = proxyAgent
+        axiosConfig.httpsAgent = proxyAgent
+        axiosConfig.proxy = false
+        logger.info(`🌐 Using proxy for OpenAI request: ${ProxyHelper.getProxyDescription(proxy)}`)
+      } else {
+        logger.debug('🌐 No proxy configured for OpenAI request')
+      }
+
+      if (isStream) {
+        upstream = await axios.post(codexEndpoint, req.body, {
+          ...axiosConfig,
+          responseType: 'stream'
+        })
+      } else {
+        upstream = await axios.post(codexEndpoint, req.body, axiosConfig)
+      }
+
+      const codexUsageSnapshot = extractCodexUsageHeaders(upstream.headers)
+      if (codexUsageSnapshot) {
+        try {
+          await openaiAccountService.updateCodexUsageSnapshot(accountId, codexUsageSnapshot)
+        } catch (codexError) {
+          logger.error('⚠️ 更新 Codex 使用统计失败:', codexError)
+        }
+      }
+
+      if (upstream.status !== 429) {
+        break
+      }
+
       logger.warn(`🚫 Rate limit detected for OpenAI account ${accountId} (Codex API)`)
 
-      // 解析响应体中的限流信息
-      let resetsInSeconds = null
-      let errorData = null
-
-      try {
-        // 对于429错误，无论是否是流式请求，响应都会是完整的JSON错误对象
-        if (isStream && upstream.data) {
-          // 流式响应需要先收集数据
-          const chunks = []
-          await new Promise((resolve, reject) => {
-            upstream.data.on('data', (chunk) => chunks.push(chunk))
-            upstream.data.on('end', resolve)
-            upstream.data.on('error', reject)
-            // 设置超时防止无限等待
-            setTimeout(resolve, 5000)
-          })
-
-          const fullResponse = Buffer.concat(chunks).toString()
-          try {
-            errorData = JSON.parse(fullResponse)
-          } catch (e) {
-            logger.error('Failed to parse 429 error response:', e)
-            logger.debug('Raw response:', fullResponse)
-          }
-        } else {
-          // 非流式响应直接使用data
-          errorData = upstream.data
-        }
-
-        // 提取重置时间
-        if (errorData && errorData.error && errorData.error.resets_in_seconds) {
-          resetsInSeconds = errorData.error.resets_in_seconds
-          logger.info(
-            `🕐 Codex rate limit will reset in ${resetsInSeconds} seconds (${Math.ceil(resetsInSeconds / 60)} minutes / ${Math.ceil(resetsInSeconds / 3600)} hours)`
-          )
-        } else {
-          logger.warn(
-            '⚠️ Could not extract resets_in_seconds from 429 response, using default 60 minutes'
-          )
-        }
-      } catch (e) {
-        logger.error('⚠️ Failed to parse rate limit error:', e)
-      }
-
-      // 标记账户为限流状态
+      const { resetsInSeconds, errorData } = await parseRateLimitError(upstream, isStream)
       await unifiedOpenAIScheduler.markAccountRateLimited(
         accountId,
         'openai',
@@ -440,29 +528,29 @@ const handleResponses = async (req, res) => {
         resetsInSeconds
       )
 
-      // 返回错误响应给客户端
-      const errorResponse = errorData || {
-        error: {
-          type: 'usage_limit_reached',
-          message: 'The usage limit has been reached',
-          resets_in_seconds: resetsInSeconds
-        }
+      lastRateLimitResult = { resetsInSeconds, errorData }
+      failoverCount += 1
+
+      if (hasDedicatedBinding || failoverCount >= MAX_429_FAILOVER_ATTEMPTS) {
+        const errorResponse = createRateLimitErrorResponse(errorData, resetsInSeconds)
+        sendRateLimitResponse(res, isStream, errorResponse)
+        return
       }
 
-      if (isStream) {
-        // 流式响应也需要设置正确的状态码
-        res.status(429)
-        res.setHeader('Content-Type', 'text/event-stream')
-        res.setHeader('Cache-Control', 'no-cache')
-        res.setHeader('Connection', 'keep-alive')
-        res.write(`data: ${JSON.stringify(errorResponse)}\n\n`)
-        res.end()
-      } else {
-        res.status(429).json(errorResponse)
+      try {
+        authContext = await getOpenAIAuthToken(apiKeyData, sessionId, requestedModel)
+      } catch (selectionError) {
+        logger.warn(
+          '⚠️ Failed to select fallback OpenAI account after 429:',
+          selectionError.message
+        )
+        const errorResponse = createRateLimitErrorResponse(errorData, resetsInSeconds)
+        sendRateLimitResponse(res, isStream, errorResponse)
+        return
       }
+    }
 
-      return
-    } else if (upstream.status === 401 || upstream.status === 402) {
+    if (upstream.status === 401 || upstream.status === 402) {
       const unauthorizedStatus = upstream.status
       const statusDescription = unauthorizedStatus === 401 ? 'Unauthorized' : 'Payment required'
       logger.warn(
