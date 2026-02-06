@@ -8,6 +8,7 @@ const unifiedClaudeScheduler = require('../services/unifiedClaudeScheduler')
 const apiKeyService = require('../services/apiKeyService')
 const { authenticateApiKey } = require('../middleware/auth')
 const logger = require('../utils/logger')
+const { getDateStringInTimezone } = require('../utils/commonHelper')
 const { getEffectiveModel, parseVendorPrefixedModel } = require('../utils/modelHelper')
 const sessionHelper = require('../utils/sessionHelper')
 const { updateRateLimitCounters } = require('../utils/rateLimitHelper')
@@ -1421,6 +1422,41 @@ router.get('/v1/usage', authenticateApiKey, async (req, res) => {
     logger.error('❌ Usage stats error:', error)
     res.status(500).json({
       error: 'Failed to get usage stats',
+      message: error.message
+    })
+  }
+})
+
+// 🔢 今日 Token 统计端点 - /api/v1/tokens/today
+router.get('/v1/tokens/today', authenticateApiKey, async (req, res) => {
+  try {
+    const usage = await apiKeyService.getUsageStats(req.apiKey.id, { includeRecords: false })
+    const today = getDateStringInTimezone()
+    const dailyUsage = usage?.daily || {}
+    const allTokens = dailyUsage.allTokens || dailyUsage.tokens || 0
+
+    res.json({
+      success: true,
+      data: {
+        apiKeyId: req.apiKey.id,
+        apiKeyName: req.apiKey.name,
+        date: today,
+        usage: {
+          requests: dailyUsage.requests || 0,
+          tokens: allTokens,
+          allTokens,
+          inputTokens: dailyUsage.inputTokens || 0,
+          outputTokens: dailyUsage.outputTokens || 0,
+          cacheCreateTokens: dailyUsage.cacheCreateTokens || 0,
+          cacheReadTokens: dailyUsage.cacheReadTokens || 0
+        }
+      },
+      timestamp: new Date().toISOString()
+    })
+  } catch (error) {
+    logger.error('❌ Today token stats error:', error)
+    res.status(500).json({
+      error: 'Failed to get today token stats',
       message: error.message
     })
   }
