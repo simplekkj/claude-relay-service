@@ -556,7 +556,7 @@ import AggregatedStatsCard from '@/components/apistats/AggregatedStatsCard.vue'
 import ModelUsageStats from '@/components/apistats/ModelUsageStats.vue'
 import ServiceCostCards from '@/components/apistats/ServiceCostCards.vue'
 import TutorialView from './TutorialView.vue'
-import ApiKeyTestModal from '@/components/apikeys/ApiKeyTestModal.vue'
+import UnifiedTestModal from '@/components/common/UnifiedTestModal.vue'
 import PublicStatsOverview from '@/components/common/PublicStatsOverview.vue'
 
 const route = useRoute()
