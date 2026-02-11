@@ -15,6 +15,7 @@ const ProxyHelper = require('../utils/proxyHelper')
 const { updateRateLimitCounters } = require('../utils/rateLimitHelper')
 const { IncrementalSSEParser } = require('../utils/sseParser')
 const { getSafeMessage } = require('../utils/errorSanitizer')
+const { isSchedulable, sortAccountsByPriority } = require('../utils/commonHelper')
 
 const DEFAULT_429_FAILOVER_ATTEMPTS = 3
 const MAX_429_FAILOVER_ATTEMPTS = (() => {
@@ -33,6 +34,63 @@ function createProxyAgent(proxy) {
 // 检查 API Key 是否具备 OpenAI 权限
 function checkOpenAIPermissions(apiKeyData) {
   return apiKeyService.hasPermission(apiKeyData?.permissions, 'openai')
+}
+
+function normalizeBooleanQuery(value) {
+  if (typeof value !== 'string') {
+    return false
+  }
+  const normalized = value.trim().toLowerCase()
+  return normalized === '1' || normalized === 'true' || normalized === 'yes'
+}
+
+function extractModelId(candidate) {
+  if (typeof candidate === 'string') {
+    const modelId = candidate.trim()
+    return modelId || null
+  }
+
+  if (!candidate || typeof candidate !== 'object') {
+    return null
+  }
+
+  const fromId = typeof candidate.id === 'string' ? candidate.id.trim() : ''
+  if (fromId) {
+    return fromId
+  }
+
+  const fromValue = typeof candidate.value === 'string' ? candidate.value.trim() : ''
+  if (fromValue) {
+    return fromValue
+  }
+
+  const fromName = typeof candidate.name === 'string' ? candidate.name.trim() : ''
+  if (fromName) {
+    return fromName
+  }
+
+  return null
+}
+
+function toOpenAIModelList(candidates, ownedBy = 'openai') {
+  const now = Math.floor(Date.now() / 1000)
+  const modelMap = new Map()
+
+  for (const candidate of candidates || []) {
+    const modelId = extractModelId(candidate)
+    if (!modelId || modelMap.has(modelId)) {
+      continue
+    }
+
+    modelMap.set(modelId, {
+      id: modelId,
+      object: 'model',
+      created: now,
+      owned_by: ownedBy
+    })
+  }
+
+  return Array.from(modelMap.values()).sort((a, b) => a.id.localeCompare(b.id))
 }
 
 function normalizeHeaders(headers = {}) {
@@ -286,6 +344,132 @@ async function getOpenAIAuthToken(apiKeyData, sessionId = null, requestedModel =
   } catch (error) {
     logger.error('Failed to get OpenAI auth token:', error)
     throw error
+  }
+}
+
+async function findOpenAIResponsesAccountForModels(apiKeyData, sessionId = null) {
+  const scheduled = await getOpenAIAuthToken(apiKeyData, sessionId, null)
+  if (scheduled.accountType === 'openai-responses') {
+    return scheduled
+  }
+
+  if (typeof apiKeyData?.openaiAccountId === 'string' && apiKeyData.openaiAccountId.length > 0) {
+    return null
+  }
+
+  const accounts = await openaiResponsesAccountService.getAllAccounts()
+  if (!Array.isArray(accounts) || accounts.length === 0) {
+    return null
+  }
+
+  const candidates = sortAccountsByPriority(
+    accounts.filter((account) => {
+      if (!account || !account.id) {
+        return false
+      }
+
+      if (account.status === 'error' || account.status === 'unauthorized') {
+        return false
+      }
+
+      if (!isSchedulable(account.schedulable)) {
+        return false
+      }
+
+      if (openaiResponsesAccountService.isSubscriptionExpired(account)) {
+        return false
+      }
+
+      return true
+    })
+  )
+
+  for (const candidate of candidates) {
+    const hasRateLimitFlag =
+      candidate.rateLimitStatus?.isRateLimited === true ||
+      candidate.rateLimitStatus?.status === 'limited' ||
+      candidate.status === 'rateLimited'
+
+    if (hasRateLimitFlag) {
+      const cleared = await openaiResponsesAccountService.checkAndClearRateLimit(candidate.id)
+      if (!cleared) {
+        continue
+      }
+    }
+
+    const account = await openaiResponsesAccountService.getAccount(candidate.id)
+    if (!account || !account.apiKey) {
+      continue
+    }
+
+    return {
+      accountId: candidate.id,
+      accountType: 'openai-responses',
+      accountName: account.name,
+      accessToken: null,
+      proxy: account.proxy || null,
+      account
+    }
+  }
+
+  return null
+}
+
+async function handleGetModels(req, res) {
+  try {
+    const apiKeyData = req.apiKey || {}
+    if (!checkOpenAIPermissions(apiKeyData)) {
+      return res.status(403).json({
+        error: {
+          message: 'This API key does not have permission to access OpenAI',
+          type: 'permission_denied',
+          code: 'permission_denied'
+        }
+      })
+    }
+
+    const sessionId = req.headers['session_id'] || req.headers['x-session-id'] || null
+    const forceRefresh = normalizeBooleanQuery(req.query?.forceRefresh)
+
+    const selected = await findOpenAIResponsesAccountForModels(apiKeyData, sessionId)
+    if (!selected) {
+      return res.status(503).json({
+        error: {
+          message:
+            'No available OpenAI-Responses upstream account for live model discovery. Please configure a schedulable OpenAI-Responses account.',
+          type: 'upstream_unavailable',
+          code: 'models_upstream_unavailable'
+        }
+      })
+    }
+
+    const dynamicModels = await openaiResponsesAccountService.fetchAvailableModels(
+      selected.accountId,
+      {
+        forceRefresh
+      }
+    )
+
+    let models = toOpenAIModelList(dynamicModels, 'openai')
+
+    if (apiKeyData.enableModelRestriction && apiKeyData.restrictedModels?.length > 0) {
+      models = models.filter((model) => !apiKeyData.restrictedModels.includes(model.id))
+    }
+
+    return res.json({
+      object: 'list',
+      data: models
+    })
+  } catch (error) {
+    const statusCode = error.statusCode || error.response?.status || 500
+    logger.error('Failed to get OpenAI models from upstream:', error)
+    return res.status(statusCode).json({
+      error: {
+        message: getSafeMessage(error),
+        type: statusCode >= 500 ? 'upstream_error' : 'api_error',
+        code: 'models_fetch_failed'
+      }
+    })
   }
 }
 
@@ -953,6 +1137,8 @@ router.post('/responses', authenticateApiKey, handleResponses)
 router.post('/v1/responses', authenticateApiKey, handleResponses)
 router.post('/responses/compact', authenticateApiKey, handleResponses)
 router.post('/v1/responses/compact', authenticateApiKey, handleResponses)
+router.get('/models', authenticateApiKey, handleGetModels)
+router.get('/v1/models', authenticateApiKey, handleGetModels)
 
 // 使用情况统计端点
 router.get('/usage', authenticateApiKey, async (req, res) => {
