@@ -480,9 +480,10 @@
     </div>
 
     <!-- API Key 测试弹窗 -->
-    <ApiKeyTestModal
+    <UnifiedTestModal
       :api-key-name="statsData?.name || ''"
       :api-key-value="apiKey"
+      mode="apikey"
       :service-type="testServiceType"
       :show="showTestModal"
       @close="closeTestModal"

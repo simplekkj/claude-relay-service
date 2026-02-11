@@ -1,13 +1,14 @@
 const axios = require('axios')
-const ProxyHelper = require('../utils/proxyHelper')
-const logger = require('../utils/logger')
-const { filterForOpenAI } = require('../utils/headerFilter')
-const openaiResponsesAccountService = require('./openaiResponsesAccountService')
-const apiKeyService = require('./apiKeyService')
-const unifiedOpenAIScheduler = require('./unifiedOpenAIScheduler')
-const config = require('../../config/config')
+const ProxyHelper = require('../../utils/proxyHelper')
+const logger = require('../../utils/logger')
+const { filterForOpenAI } = require('../../utils/headerFilter')
+const openaiResponsesAccountService = require('../account/openaiResponsesAccountService')
+const apiKeyService = require('../apiKeyService')
+const unifiedOpenAIScheduler = require('../scheduler/unifiedOpenAIScheduler')
+const config = require('../../../config/config')
 const crypto = require('crypto')
-const LRUCache = require('../utils/lruCache')
+const LRUCache = require('../../utils/lruCache')
+const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
 
 // lastUsedAt 更新节流（每账户 60 秒内最多更新一次，使用 LRU 防止内存泄漏）
 const lastUsedAtThrottle = new LRUCache(1000) // 最多缓存 1000 个账户
@@ -230,31 +231,23 @@ class OpenAIResponsesRelayService {
         })
 
         if (response.status === 401) {
-          let reason = 'OpenAI Responses账号认证失败（401错误）'
-          if (errorData) {
-            if (typeof errorData === 'string' && errorData.trim()) {
-              reason = `OpenAI Responses账号认证失败（401错误）：${errorData.trim()}`
-            } else if (
-              errorData.error &&
-              typeof errorData.error.message === 'string' &&
-              errorData.error.message.trim()
-            ) {
-              reason = `OpenAI Responses账号认证失败（401错误）：${errorData.error.message.trim()}`
-            } else if (typeof errorData.message === 'string' && errorData.message.trim()) {
-              reason = `OpenAI Responses账号认证失败（401错误）：${errorData.message.trim()}`
-            }
-          }
+          logger.warn(`🚫 OpenAI Responses账号认证失败（401错误）for account ${account?.id}`)
 
           try {
-            await unifiedOpenAIScheduler.markAccountUnauthorized(
-              account.id,
-              'openai-responses',
-              sessionHash,
-              reason
-            )
+            // 仅临时暂停，不永久禁用
+            const oaiAutoProtectionDisabled =
+              account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+            if (!oaiAutoProtectionDisabled) {
+              await upstreamErrorHelper
+                .markTempUnavailable(account.id, 'openai-responses', 401)
+                .catch(() => {})
+            }
+            if (sessionHash) {
+              await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
+            }
           } catch (markError) {
             logger.error(
-              '❌ Failed to mark OpenAI-Responses account unauthorized after 401:',
+              '❌ Failed to mark OpenAI-Responses account temporarily unavailable after 401:',
               markError
             )
           }
@@ -284,11 +277,36 @@ class OpenAIResponsesRelayService {
           return res.status(401).json(unauthorizedResponse)
         }
 
+        // 处理 5xx 上游错误
+        if (response.status >= 500 && account?.id) {
+          try {
+            const oaiAutoProtectionDisabled =
+              account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+            if (!oaiAutoProtectionDisabled) {
+              await upstreamErrorHelper.markTempUnavailable(
+                account.id,
+                'openai-responses',
+                response.status
+              )
+            }
+            if (sessionHash) {
+              await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
+            }
+          } catch (markError) {
+            logger.warn(
+              'Failed to mark OpenAI-Responses account temporarily unavailable:',
+              markError
+            )
+          }
+        }
+
         // 清理监听器
         req.removeListener('close', handleClientDisconnect)
         res.removeListener('close', handleClientDisconnect)
 
-        return res.status(response.status).json(errorData)
+        return res
+          .status(response.status)
+          .json(upstreamErrorHelper.sanitizeErrorForClient(errorData))
       }
 
       // 更新最后使用时间（节流）
@@ -326,10 +344,15 @@ class OpenAIResponsesRelayService {
 
       // 检查是否是网络错误
       if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
-        await openaiResponsesAccountService.updateAccount(account.id, {
-          status: 'error',
-          errorMessage: `Connection error: ${error.code}`
-        })
+        if (account?.id) {
+          const oaiAutoProtectionDisabled =
+            account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+          if (!oaiAutoProtectionDisabled) {
+            await upstreamErrorHelper
+              .markTempUnavailable(account.id, 'openai-responses', 503)
+              .catch(() => {})
+          }
+        }
       }
 
       // 如果已经发送了响应头，直接结束
@@ -364,31 +387,25 @@ class OpenAIResponsesRelayService {
         }
 
         if (status === 401) {
-          let reason = 'OpenAI Responses账号认证失败（401错误）'
-          if (errorData) {
-            if (typeof errorData === 'string' && errorData.trim()) {
-              reason = `OpenAI Responses账号认证失败（401错误）：${errorData.trim()}`
-            } else if (
-              errorData.error &&
-              typeof errorData.error.message === 'string' &&
-              errorData.error.message.trim()
-            ) {
-              reason = `OpenAI Responses账号认证失败（401错误）：${errorData.error.message.trim()}`
-            } else if (typeof errorData.message === 'string' && errorData.message.trim()) {
-              reason = `OpenAI Responses账号认证失败（401错误）：${errorData.message.trim()}`
-            }
-          }
+          logger.warn(
+            `🚫 OpenAI Responses账号认证失败（401错误）for account ${account?.id} (catch handler)`
+          )
 
           try {
-            await unifiedOpenAIScheduler.markAccountUnauthorized(
-              account.id,
-              'openai-responses',
-              sessionHash,
-              reason
-            )
+            // 仅临时暂停，不永久禁用
+            const oaiAutoProtectionDisabled =
+              account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
+            if (!oaiAutoProtectionDisabled) {
+              await upstreamErrorHelper
+                .markTempUnavailable(account.id, 'openai-responses', 401)
+                .catch(() => {})
+            }
+            if (sessionHash) {
+              await unifiedOpenAIScheduler._deleteSessionMapping(sessionHash).catch(() => {})
+            }
           } catch (markError) {
             logger.error(
-              '❌ Failed to mark OpenAI-Responses account unauthorized in catch handler:',
+              '❌ Failed to mark OpenAI-Responses account temporarily unavailable in catch handler:',
               markError
             )
           }
@@ -414,7 +431,7 @@ class OpenAIResponsesRelayService {
           return res.status(401).json(unauthorizedResponse)
         }
 
-        return res.status(status).json(errorData)
+        return res.status(status).json(upstreamErrorHelper.sanitizeErrorForClient(errorData))
       }
 
       // 其他错误
@@ -583,7 +600,7 @@ class OpenAIResponsesRelayService {
           // 更新账户使用额度（如果设置了额度限制）
           if (parseFloat(account.dailyQuota) > 0) {
             // 使用CostCalculator正确计算费用（考虑缓存token的不同价格）
-            const CostCalculator = require('../utils/costCalculator')
+            const CostCalculator = require('../../utils/costCalculator')
             const costInfo = CostCalculator.calculateCost(
               {
                 input_tokens: actualInputTokens, // 实际输入（不含缓存）
@@ -712,7 +729,7 @@ class OpenAIResponsesRelayService {
         // 更新账户使用额度（如果设置了额度限制）
         if (parseFloat(account.dailyQuota) > 0) {
           // 使用CostCalculator正确计算费用（考虑缓存token的不同价格）
-          const CostCalculator = require('../utils/costCalculator')
+          const CostCalculator = require('../../utils/costCalculator')
           const costInfo = CostCalculator.calculateCost(
             {
               input_tokens: actualInputTokens, // 实际输入（不含缓存）
