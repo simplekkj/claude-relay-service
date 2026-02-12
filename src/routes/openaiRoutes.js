@@ -49,6 +49,7 @@ const MODELS_FORWARD_HEADER_KEYS = [
   'openai-beta',
   'x-codex-beta-features',
   'x-responsesapi-include-timing-metrics',
+  'if-none-match',
   'originator',
   'x-openai-internal-codex-residency'
 ]
@@ -71,6 +72,7 @@ const OPENAI_UPSTREAM_PASS_THROUGH_HEADER_KEYS = new Set([
   'x-request-id',
   'openai-processing-ms',
   'retry-after',
+  'cache-control',
   'x-models-etag',
   'x-reasoning-included',
   'etag'
@@ -178,7 +180,7 @@ function buildCodexModelInfo(modelId, priority) {
   }
 }
 
-function buildModelsEtag(payload) {
+function _buildModelsEtag(payload) {
   const digest = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex')
   return `"${digest}"`
 }
@@ -363,7 +365,7 @@ function normalizeUpstreamCodexModel(rawModel, priority) {
   }
 }
 
-function normalizeDynamicModelsPayload(payload) {
+function _normalizeDynamicModelsPayload(payload) {
   const candidates = []
 
   if (Array.isArray(payload?.models)) {
@@ -411,7 +413,7 @@ function normalizeDynamicModelsPayload(payload) {
   })
 }
 
-function filterModelsByApiKeyRestriction(models, apiKeyData) {
+function _filterModelsByApiKeyRestriction(models, apiKeyData) {
   if (
     !apiKeyData?.enableModelRestriction ||
     !Array.isArray(apiKeyData.restrictedModels) ||
@@ -464,16 +466,7 @@ async function fetchCodexModelsFromOpenAIAccount(authContext, req) {
   }
 
   const upstream = await axios.get(modelsUrl, axiosConfig)
-  if (upstream.status < 200 || upstream.status >= 300) {
-    throw new Error(`OpenAI codex models endpoint returned status ${upstream.status}`)
-  }
-
-  const normalizedModels = normalizeDynamicModelsPayload(upstream.data)
-  if (normalizedModels.length === 0) {
-    throw new Error('No models returned from OpenAI codex models endpoint')
-  }
-
-  return normalizedModels
+  return upstream
 }
 
 async function fetchCodexModelsFromOpenAIResponsesAccount(authContext, req) {
@@ -525,20 +518,7 @@ async function fetchCodexModelsFromOpenAIResponsesAccount(authContext, req) {
   }
 
   const upstream = await axios.get(modelsUrl, axiosConfig)
-  if (upstream.status < 200 || upstream.status >= 300) {
-    const error = new Error(`OpenAI-Responses models endpoint returned status ${upstream.status}`)
-    error.statusCode = upstream.status
-    throw error
-  }
-
-  const normalizedModels = normalizeDynamicModelsPayload(upstream.data)
-  if (normalizedModels.length === 0) {
-    const error = new Error('No models returned from OpenAI-Responses models endpoint')
-    error.statusCode = 503
-    throw error
-  }
-
-  return normalizedModels
+  return upstream
 }
 
 async function fetchDynamicCodexModelInfos(authContext, req) {
@@ -583,12 +563,12 @@ async function handleCodexModels(req, res) {
       typeof req.query?.model === 'string' && req.query.model.trim() ? req.query.model.trim() : null
     let authContext = null
 
-    let modelInfos = []
+    let upstream = null
     try {
       authContext = await getOpenAIAuthToken(apiKeyData, sessionId, requestedModelHint)
-      modelInfos = await fetchDynamicCodexModelInfos(authContext, req)
+      upstream = await fetchDynamicCodexModelInfos(authContext, req)
       logger.info(
-        `📋 Loaded dynamic OpenAI model catalog from ${authContext.accountType}:${authContext.accountId} (${modelInfos.length} models)`
+        `📋 Loaded dynamic OpenAI model catalog from ${authContext.accountType}:${authContext.accountId} (status=${upstream?.status})`
       )
     } catch (dynamicError) {
       logger.warn(
@@ -601,19 +581,19 @@ async function handleCodexModels(req, res) {
         .json(buildModelsCatalogUnavailablePayload(authContext?.accountType, dynamicError))
     }
 
-    modelInfos = filterModelsByApiKeyRestriction(modelInfos, apiKeyData)
-    const payload = { models: modelInfos }
+    // 透明透传上游 /models 响应，保持与官方 ETag / 状态码语义一致
+    res.status(upstream.status)
+    applyOpenAIUpstreamHeaders(res, upstream.headers)
 
-    const etag = buildModelsEtag(payload)
-    const ifNoneMatch = String(req.headers['if-none-match'] || '').trim()
-    if (ifNoneMatch && ifNoneMatch === etag) {
-      res.setHeader('ETag', etag)
-      return res.status(304).end()
+    if (upstream.status === 304) {
+      return res.end()
     }
 
-    res.setHeader('ETag', etag)
-    res.setHeader('Cache-Control', 'private, max-age=60')
-    return res.json(payload)
+    if (upstream.data === undefined) {
+      return res.end()
+    }
+
+    return res.send(upstream.data)
   } catch (error) {
     logger.error('❌ OpenAI Codex models list error:', error)
     return res.status(500).json({
