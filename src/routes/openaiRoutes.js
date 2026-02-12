@@ -15,6 +15,7 @@ const ProxyHelper = require('../utils/proxyHelper')
 const { updateRateLimitCounters } = require('../utils/rateLimitHelper')
 const { IncrementalSSEParser } = require('../utils/sseParser')
 const { getSafeMessage } = require('../utils/errorSanitizer')
+const upstreamErrorHelper = require('../utils/upstreamErrorHelper')
 
 const DEFAULT_429_FAILOVER_ATTEMPTS = 3
 const MAX_429_FAILOVER_ATTEMPTS = (() => {
@@ -57,18 +58,48 @@ function toNumberSafe(value) {
   return Number.isFinite(num) ? num : null
 }
 
+function toResetAfterSecondsFromResetAt(value) {
+  const ts = toNumberSafe(value)
+  if (ts === null) {
+    return null
+  }
+
+  const nowMs = Date.now()
+  const nowSeconds = nowMs / 1000
+
+  if (ts > 1e12) {
+    const remaining = Math.ceil((ts - nowMs) / 1000)
+    return remaining > 0 ? remaining : null
+  }
+
+  if (ts > 1e9) {
+    const remaining = Math.ceil(ts - nowSeconds)
+    return remaining > 0 ? remaining : null
+  }
+
+  return null
+}
+
 function extractCodexUsageHeaders(headers) {
   const normalized = normalizeHeaders(headers)
   if (!normalized || Object.keys(normalized).length === 0) {
     return null
   }
 
+  const primaryResetAfterSeconds =
+    toNumberSafe(normalized['x-codex-primary-reset-after-seconds']) ??
+    toResetAfterSecondsFromResetAt(normalized['x-codex-primary-reset-at'])
+
+  const secondaryResetAfterSeconds =
+    toNumberSafe(normalized['x-codex-secondary-reset-after-seconds']) ??
+    toResetAfterSecondsFromResetAt(normalized['x-codex-secondary-reset-at'])
+
   const snapshot = {
     primaryUsedPercent: toNumberSafe(normalized['x-codex-primary-used-percent']),
-    primaryResetAfterSeconds: toNumberSafe(normalized['x-codex-primary-reset-after-seconds']),
+    primaryResetAfterSeconds,
     primaryWindowMinutes: toNumberSafe(normalized['x-codex-primary-window-minutes']),
     secondaryUsedPercent: toNumberSafe(normalized['x-codex-secondary-used-percent']),
-    secondaryResetAfterSeconds: toNumberSafe(normalized['x-codex-secondary-reset-after-seconds']),
+    secondaryResetAfterSeconds,
     secondaryWindowMinutes: toNumberSafe(normalized['x-codex-secondary-window-minutes']),
     primaryOverSecondaryPercent: toNumberSafe(
       normalized['x-codex-primary-over-secondary-limit-percent']
@@ -94,24 +125,65 @@ async function parseRateLimitError(upstream, isStream) {
       })
 
       const fullResponse = Buffer.concat(chunks).toString()
-      try {
-        errorData = JSON.parse(fullResponse)
-      } catch (e) {
-        logger.error('Failed to parse 429 error response:', e)
-        logger.debug('Raw response:', fullResponse)
+      if (fullResponse.includes('data: ')) {
+        const lines = fullResponse.split('\n')
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) {
+            continue
+          }
+          const payload = line.slice(6).trim()
+          if (!payload || payload === '[DONE]') {
+            continue
+          }
+          try {
+            const parsed = JSON.parse(payload)
+            if (parsed?.error) {
+              errorData = parsed
+              break
+            }
+            if (parsed?.response?.error) {
+              errorData = { error: parsed.response.error }
+              break
+            }
+            if (!errorData) {
+              errorData = parsed
+            }
+          } catch {
+            // ignore line-level parse errors and continue scanning
+          }
+        }
+      }
+
+      if (!errorData) {
+        try {
+          errorData = JSON.parse(fullResponse)
+        } catch (e) {
+          logger.error('Failed to parse 429 error response:', e)
+          logger.debug('Raw response:', fullResponse)
+        }
       }
     } else {
       errorData = upstream.data
+      if (typeof errorData === 'string') {
+        try {
+          errorData = JSON.parse(errorData)
+        } catch {
+          errorData = { error: { message: errorData } }
+        }
+      }
     }
 
-    if (errorData && errorData.error && errorData.error.resets_in_seconds) {
-      resetsInSeconds = errorData.error.resets_in_seconds
+    resetsInSeconds =
+      upstreamErrorHelper.parseRateLimitDelayFromError(errorData) ||
+      upstreamErrorHelper.parseRetryAfter(upstream.headers)
+
+    if (resetsInSeconds !== null) {
       logger.info(
         `🕐 Codex rate limit will reset in ${resetsInSeconds} seconds (${Math.ceil(resetsInSeconds / 60)} minutes / ${Math.ceil(resetsInSeconds / 3600)} hours)`
       )
     } else {
       logger.warn(
-        '⚠️ Could not extract resets_in_seconds from 429 response, using default 60 minutes'
+        '⚠️ Could not extract reset time from 429 response, using scheduler default behavior'
       )
     }
   } catch (error) {
@@ -145,6 +217,46 @@ function sendRateLimitResponse(res, isStream, errorResponse) {
   }
 
   res.status(429).json(errorResponse)
+}
+
+function extractStreamErrorPayload(eventData) {
+  if (!eventData || typeof eventData !== 'object') {
+    return null
+  }
+
+  if (eventData.error && typeof eventData.error === 'object') {
+    return eventData.error
+  }
+
+  if (eventData.response?.error && typeof eventData.response.error === 'object') {
+    return eventData.response.error
+  }
+
+  return null
+}
+
+function isRateLimitErrorPayload(errorPayload) {
+  if (!errorPayload || typeof errorPayload !== 'object') {
+    return false
+  }
+
+  const type = String(errorPayload.type || '').toLowerCase()
+  const code = String(errorPayload.code || '').toLowerCase()
+  const message = String(errorPayload.message || '').toLowerCase()
+
+  if (
+    type === 'usage_limit_reached' ||
+    type === 'rate_limit_error' ||
+    type === 'rate_limit_exceeded'
+  ) {
+    return true
+  }
+
+  if (code === 'rate_limit_exceeded') {
+    return true
+  }
+
+  return message.includes('rate limit') || message.includes('too many requests')
 }
 
 async function applyRateLimitTracking(req, usageSummary, model, context = '', accountType = null) {
@@ -386,7 +498,17 @@ const handleResponses = async (req, res) => {
     // 基于白名单构造上游所需的请求头，确保键为小写且值受控
     const incoming = req.headers || {}
 
-    const allowedKeys = ['version', 'openai-beta', 'session_id']
+    const allowedKeys = [
+      'version',
+      'openai-version',
+      'openai-beta',
+      'session_id',
+      'x-session-id',
+      'x-codex-turn-state',
+      'x-codex-turn-metadata',
+      'x-codex-beta-features',
+      'x-responsesapi-include-timing-metrics'
+    ]
 
     // 判断是否访问 compact 端点
     const isCompactRoute =
@@ -654,12 +776,22 @@ const handleResponses = async (req, res) => {
       res.setHeader('Content-Type', 'application/json')
     }
 
-    // 透传关键诊断头，避免传递不安全或与传输相关的头
-    const passThroughHeaderKeys = ['openai-version', 'x-request-id', 'openai-processing-ms']
-    for (const key of passThroughHeaderKeys) {
-      const val = upstream.headers?.[key]
-      if (val !== undefined) {
-        res.setHeader(key, val)
+    // 透传关键诊断头与 Codex 相关头，避免传递不安全或与传输相关的头
+    const passThroughHeaderKeys = new Set([
+      'openai-version',
+      'x-request-id',
+      'openai-processing-ms',
+      'retry-after'
+    ])
+    for (const [key, val] of Object.entries(upstream.headers || {})) {
+      const lowerKey = key.toLowerCase()
+      const shouldPass =
+        passThroughHeaderKeys.has(lowerKey) ||
+        lowerKey.startsWith('x-codex-') ||
+        lowerKey.startsWith('x-responsesapi-') ||
+        lowerKey.startsWith('x-ratelimit-')
+      if (shouldPass && val !== undefined) {
+        res.setHeader(lowerKey, val)
       }
     }
 
@@ -745,8 +877,11 @@ const handleResponses = async (req, res) => {
 
     // 处理解析出的事件
     const processSSEEvent = (eventData) => {
-      // 检查是否是 response.completed 事件
-      if (eventData.type === 'response.completed' && eventData.response) {
+      // 检查 completion 事件（兼容 response.completed / response.done）
+      if (
+        (eventData.type === 'response.completed' || eventData.type === 'response.done') &&
+        eventData.response
+      ) {
         // 从响应中获取真实的 model
         if (eventData.response.model) {
           actualModel = eventData.response.model
@@ -760,14 +895,28 @@ const handleResponses = async (req, res) => {
         }
       }
 
-      // 检查是否有限流错误
-      if (eventData.error && eventData.error.type === 'usage_limit_reached') {
+      const errorPayload = extractStreamErrorPayload(eventData)
+      if (eventData.type === 'response.failed' && errorPayload) {
+        logger.warn('⚠️ OpenAI stream received response.failed', {
+          errorType: errorPayload.type,
+          errorCode: errorPayload.code
+        })
+      }
+
+      // 检查是否有限流错误（兼容 response.failed / error 事件）
+      if (isRateLimitErrorPayload(errorPayload)) {
         rateLimitDetected = true
-        if (eventData.error.resets_in_seconds) {
-          rateLimitResetsInSeconds = eventData.error.resets_in_seconds
+        if (rateLimitResetsInSeconds === null) {
+          rateLimitResetsInSeconds =
+            upstreamErrorHelper.parseRateLimitDelayFromError({ error: errorPayload }) ||
+            upstreamErrorHelper.parseRateLimitDelayFromError(errorPayload)
+        }
+        if (rateLimitResetsInSeconds !== null) {
           logger.warn(
             `🚫 Rate limit detected in stream, resets in ${rateLimitResetsInSeconds} seconds`
           )
+        } else {
+          logger.warn('🚫 Rate limit detected in stream (reset time unknown)')
         }
       }
     }
@@ -850,12 +999,14 @@ const handleResponses = async (req, res) => {
 
       // 如果在流式响应中检测到限流
       if (rateLimitDetected) {
+        const inferredReset =
+          rateLimitResetsInSeconds || upstreamErrorHelper.parseRetryAfter(upstream.headers)
         logger.warn(`🚫 Processing rate limit for OpenAI account ${accountId} from stream`)
         await unifiedOpenAIScheduler.markAccountRateLimited(
           accountId,
           'openai',
           sessionHash,
-          rateLimitResetsInSeconds
+          inferredReset
         )
       } else if (upstream.status === 200) {
         // 流式请求成功，检查并移除限流状态

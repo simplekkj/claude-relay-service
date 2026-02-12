@@ -56,6 +56,27 @@ const config = {
     }
   },
 
+  // 🤖 OpenAI / Codex 配置
+  openai: {
+    // 429 自动转移最大尝试次数（最小1，默认3）
+    max429FailoverAttempts: (() => {
+      const raw = parseInt(process.env.OPENAI_MAX_429_FAILOVER_ATTEMPTS)
+      if (!Number.isFinite(raw)) {
+        return 3
+      }
+      return Math.max(1, raw)
+    })()
+  },
+
+  // ⏱️ 上游错误临时隔离 TTL（秒）
+  upstreamError: {
+    serverErrorTtlSeconds: parseInt(process.env.UPSTREAM_ERROR_SERVER_TTL_SECONDS) || 300,
+    overloadTtlSeconds: parseInt(process.env.UPSTREAM_ERROR_OVERLOAD_TTL_SECONDS) || 600,
+    authErrorTtlSeconds: parseInt(process.env.UPSTREAM_ERROR_AUTH_TTL_SECONDS) || 1800,
+    timeoutTtlSeconds: parseInt(process.env.UPSTREAM_ERROR_TIMEOUT_TTL_SECONDS) || 300,
+    rateLimitTtlSeconds: parseInt(process.env.UPSTREAM_ERROR_RATE_LIMIT_TTL_SECONDS) || 300
+  },
+
   // ☁️ Bedrock API配置
   bedrock: {
     enabled: process.env.CLAUDE_CODE_USE_BEDROCK === '1',

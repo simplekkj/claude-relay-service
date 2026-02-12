@@ -40,6 +40,46 @@ function extractCacheCreationTokens(usageData) {
   return 0
 }
 
+function extractStreamErrorPayload(eventData) {
+  if (!eventData || typeof eventData !== 'object') {
+    return null
+  }
+
+  if (eventData.error && typeof eventData.error === 'object') {
+    return eventData.error
+  }
+
+  if (eventData.response?.error && typeof eventData.response.error === 'object') {
+    return eventData.response.error
+  }
+
+  return null
+}
+
+function isRateLimitErrorPayload(errorPayload) {
+  if (!errorPayload || typeof errorPayload !== 'object') {
+    return false
+  }
+
+  const type = String(errorPayload.type || '').toLowerCase()
+  const code = String(errorPayload.code || '').toLowerCase()
+  const message = String(errorPayload.message || '').toLowerCase()
+
+  if (
+    type === 'usage_limit_reached' ||
+    type === 'rate_limit_error' ||
+    type === 'rate_limit_exceeded'
+  ) {
+    return true
+  }
+
+  if (code === 'rate_limit_exceeded') {
+    return true
+  }
+
+  return message.includes('rate limit') || message.includes('too many requests')
+}
+
 class OpenAIResponsesRelayService {
   constructor() {
     this.defaultTimeout = config.requestTimeout || 600000
@@ -495,8 +535,11 @@ class OpenAIResponsesRelayService {
 
             const eventData = JSON.parse(jsonStr)
 
-            // 检查是否是 response.completed 事件（OpenAI-Responses 格式）
-            if (eventData.type === 'response.completed' && eventData.response) {
+            // 检查 completion 事件（兼容 response.completed / response.done）
+            if (
+              (eventData.type === 'response.completed' || eventData.type === 'response.done') &&
+              eventData.response
+            ) {
               // 从响应中获取真实的 model
               if (eventData.response.model) {
                 actualModel = eventData.response.model
@@ -514,21 +557,28 @@ class OpenAIResponsesRelayService {
               }
             }
 
-            // 检查是否有限流错误
-            if (eventData.error) {
-              // 检查多种可能的限流错误类型
-              if (
-                eventData.error.type === 'rate_limit_error' ||
-                eventData.error.type === 'usage_limit_reached' ||
-                eventData.error.type === 'rate_limit_exceeded'
-              ) {
-                rateLimitDetected = true
-                if (eventData.error.resets_in_seconds) {
-                  rateLimitResetsInSeconds = eventData.error.resets_in_seconds
-                  logger.warn(
-                    `🚫 Rate limit detected in stream, resets in ${rateLimitResetsInSeconds} seconds (${Math.ceil(rateLimitResetsInSeconds / 60)} minutes)`
-                  )
-                }
+            const errorPayload = extractStreamErrorPayload(eventData)
+            if (eventData.type === 'response.failed' && errorPayload) {
+              logger.warn('⚠️ OpenAI-Responses stream received response.failed', {
+                errorType: errorPayload.type,
+                errorCode: errorPayload.code
+              })
+            }
+
+            // 检查是否有限流错误（兼容 response.failed / error 事件）
+            if (isRateLimitErrorPayload(errorPayload)) {
+              rateLimitDetected = true
+              if (rateLimitResetsInSeconds === null) {
+                rateLimitResetsInSeconds =
+                  upstreamErrorHelper.parseRateLimitDelayFromError({ error: errorPayload }) ||
+                  upstreamErrorHelper.parseRateLimitDelayFromError(errorPayload)
+              }
+              if (rateLimitResetsInSeconds !== null) {
+                logger.warn(
+                  `🚫 Rate limit detected in stream, resets in ${rateLimitResetsInSeconds} seconds (${Math.ceil(rateLimitResetsInSeconds / 60)} minutes)`
+                )
+              } else {
+                logger.warn('🚫 Rate limit detected in stream (reset time unknown)')
               }
             }
           } catch (e) {
@@ -632,6 +682,8 @@ class OpenAIResponsesRelayService {
 
       // 如果在流式响应中检测到限流
       if (rateLimitDetected) {
+        const inferredReset =
+          rateLimitResetsInSeconds || upstreamErrorHelper.parseRetryAfter(response.headers)
         // 使用统一调度器处理限流（与非流式响应保持一致）
         const sessionId = req.headers['session_id'] || req.body?.session_id
         const sessionHash = sessionId
@@ -642,7 +694,7 @@ class OpenAIResponsesRelayService {
           account.id,
           'openai-responses',
           sessionHash,
-          rateLimitResetsInSeconds
+          inferredReset
         )
 
         logger.warn(
@@ -830,24 +882,16 @@ class OpenAIResponsesRelayService {
         errorData = response.data
       }
 
-      // 从响应体中提取重置时间（OpenAI 标准格式）
-      if (errorData && errorData.error) {
-        if (errorData.error.resets_in_seconds) {
-          resetsInSeconds = errorData.error.resets_in_seconds
-          logger.info(
-            `🕐 Rate limit will reset in ${resetsInSeconds} seconds (${Math.ceil(resetsInSeconds / 60)} minutes / ${Math.ceil(resetsInSeconds / 3600)} hours)`
-          )
-        } else if (errorData.error.resets_in) {
-          // 某些 API 可能使用不同的字段名
-          resetsInSeconds = parseInt(errorData.error.resets_in)
-          logger.info(
-            `🕐 Rate limit will reset in ${resetsInSeconds} seconds (${Math.ceil(resetsInSeconds / 60)} minutes / ${Math.ceil(resetsInSeconds / 3600)} hours)`
-          )
-        }
-      }
+      resetsInSeconds =
+        upstreamErrorHelper.parseRateLimitDelayFromError(errorData) ||
+        upstreamErrorHelper.parseRetryAfter(response.headers)
 
       if (!resetsInSeconds) {
         logger.warn('⚠️ Could not extract reset time from 429 response, using default 60 minutes')
+      } else {
+        logger.info(
+          `🕐 Rate limit will reset in ${resetsInSeconds} seconds (${Math.ceil(resetsInSeconds / 60)} minutes / ${Math.ceil(resetsInSeconds / 3600)} hours)`
+        )
       }
     } catch (e) {
       logger.error('⚠️ Failed to parse rate limit error:', e)
