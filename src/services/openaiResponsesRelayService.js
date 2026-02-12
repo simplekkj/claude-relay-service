@@ -161,7 +161,7 @@ class OpenAIResponsesRelayService {
       res.once('close', handleClientDisconnect)
 
       // 构建目标 URL
-      const targetUrl = `${fullAccount.baseApi}${req.path}`
+      const targetUrl = this._buildTargetUrl(fullAccount.baseApi, req.path)
       logger.info(`🎯 Forwarding to: ${targetUrl}`)
 
       // 构建请求头 - 使用统一的 headerFilter 移除 CDN headers
@@ -169,6 +169,13 @@ class OpenAIResponsesRelayService {
         ...filterForOpenAI(req.headers),
         Authorization: `Bearer ${fullAccount.apiKey}`,
         'Content-Type': 'application/json'
+      }
+      const hasSubagentHeader = Object.keys(headers).some(
+        (key) => key.toLowerCase() === 'x-openai-subagent'
+      )
+      const isCompactPath = /\/responses\/compact$/.test(req.path || '')
+      if (isCompactPath && !hasSubagentHeader) {
+        headers['x-openai-subagent'] = 'compact'
       }
 
       // 处理 User-Agent
@@ -946,6 +953,22 @@ class OpenAIResponsesRelayService {
 
     // 返回处理后的数据，避免循环引用
     return { resetsInSeconds, errorData }
+  }
+
+  _buildTargetUrl(baseApi, requestPath) {
+    const normalizedBaseApi = String(baseApi || '')
+      .trim()
+      .replace(/\/+$/, '')
+    const normalizedPath = `/${String(requestPath || '')
+      .trim()
+      .replace(/^\/+/, '')}`
+
+    // 账户 baseApi 已包含 /v1 时，避免与 /v1/... 请求路径重复拼接
+    if (/\/v1$/i.test(normalizedBaseApi) && normalizedPath.startsWith('/v1/')) {
+      return `${normalizedBaseApi}${normalizedPath.slice(3)}`
+    }
+
+    return `${normalizedBaseApi}${normalizedPath}`
   }
 
   // 过滤请求头 - 已迁移到 headerFilter 工具类

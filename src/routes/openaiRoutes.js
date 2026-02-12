@@ -158,6 +158,44 @@ function getSessionIdFromRequest(req) {
   )
 }
 
+function isCompactEndpointRequest(req) {
+  return (
+    req.path === '/responses/compact' ||
+    req.path === '/v1/responses/compact' ||
+    (typeof req.originalUrl === 'string' && /\/responses\/compact(?:\?|$)/.test(req.originalUrl))
+  )
+}
+
+function normalizeCompactRequestBody(rawBody) {
+  const body = rawBody && typeof rawBody === 'object' ? rawBody : {}
+  const model = typeof body.model === 'string' ? body.model.trim() : ''
+  const hasInput = Array.isArray(body.input)
+  const hasInstructions = typeof body.instructions === 'string'
+
+  const missing = []
+  if (!model) {
+    missing.push('model')
+  }
+  if (!hasInput) {
+    missing.push('input')
+  }
+  if (!hasInstructions) {
+    missing.push('instructions')
+  }
+
+  if (missing.length > 0) {
+    return { missing }
+  }
+
+  return {
+    body: {
+      model,
+      input: body.input,
+      instructions: body.instructions
+    }
+  }
+}
+
 function getModelIdentifier(model) {
   if (!model) {
     return ''
@@ -900,6 +938,10 @@ const handleResponses = async (req, res) => {
   let accessToken = null
 
   try {
+    if (!req.body || typeof req.body !== 'object') {
+      req.body = {}
+    }
+
     // 从中间件获取 API Key 数据
     const apiKeyData = req.apiKey || {}
 
@@ -937,8 +979,6 @@ const handleResponses = async (req, res) => {
       requestedModel = 'gpt-5'
       req.body.model = 'gpt-5' // 同时更新请求体中的模型
     }
-
-    const isStream = req.body?.stream !== false // 默认为流式（兼容现有行为）
 
     // 判断是否为 Codex CLI 的请求（基于 User-Agent）
     // 支持: codex_vscode, codex_cli_rs, codex_exec (非交互式/脚本模式)
@@ -985,6 +1025,26 @@ const handleResponses = async (req, res) => {
 
     // 基于白名单构造上游所需的请求头，确保键为小写且值受控
     const incoming = req.headers || {}
+    const isCompactRoute = isCompactEndpointRequest(req)
+    if (isCompactRoute) {
+      const normalizedCompact = normalizeCompactRequestBody(req.body)
+      if (normalizedCompact.missing) {
+        return res.status(400).json({
+          error: {
+            message: `Invalid compact request: missing required field(s): ${normalizedCompact.missing.join(', ')}`,
+            type: 'invalid_request_error',
+            code: 'invalid_request_error'
+          }
+        })
+      }
+      req.body = normalizedCompact.body
+      if (incoming['x-openai-subagent'] === undefined) {
+        incoming['x-openai-subagent'] = 'compact'
+      }
+    } else {
+      req.body['store'] = false
+    }
+    const isStream = isCompactRoute ? false : req.body?.stream !== false
 
     const allowedKeys = [
       'version',
@@ -995,19 +1055,9 @@ const handleResponses = async (req, res) => {
       'x-codex-turn-state',
       'x-codex-turn-metadata',
       'x-codex-beta-features',
-      'x-responsesapi-include-timing-metrics'
+      'x-responsesapi-include-timing-metrics',
+      'x-openai-subagent'
     ]
-
-    // 判断是否访问 compact 端点
-    const isCompactRoute =
-      req.path === '/responses/compact' ||
-      req.path === '/v1/responses/compact' ||
-      (req.originalUrl && req.originalUrl.includes('/responses/compact'))
-    if (!isCompactRoute) {
-      req.body['store'] = false
-    } else if (req.body && Object.prototype.hasOwnProperty.call(req.body, 'store')) {
-      delete req.body['store']
-    }
 
     const codexEndpoint = isCompactRoute
       ? 'https://chatgpt.com/backend-api/codex/responses/compact'
@@ -1082,6 +1132,9 @@ const handleResponses = async (req, res) => {
         if (incoming[key] !== undefined) {
           headers[key] = incoming[key]
         }
+      }
+      if (isCompactRoute && headers['x-openai-subagent'] === undefined) {
+        headers['x-openai-subagent'] = 'compact'
       }
 
       headers['authorization'] = `Bearer ${accessToken}`
