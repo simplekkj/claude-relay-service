@@ -11,6 +11,7 @@ const redis = require('../../models/redis')
 const { authenticateAdmin } = require('../../middleware/auth')
 const logger = require('../../utils/logger')
 const CostCalculator = require('../../utils/costCalculator')
+const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
 const config = require('../../../config/config')
 
 const router = express.Router()
@@ -349,6 +350,17 @@ router.get('/dashboard', authenticateAdmin, async (req, res) => {
   } catch (error) {
     logger.error('❌ Failed to get dashboard data:', error)
     return res.status(500).json({ error: 'Failed to get dashboard data', message: error.message })
+  }
+})
+
+// 获取所有临时不可用账户状态
+router.get('/temp-unavailable', authenticateAdmin, async (req, res) => {
+  try {
+    const statuses = await upstreamErrorHelper.getAllTempUnavailable()
+    return res.json({ success: true, data: statuses })
+  } catch (error) {
+    logger.error('❌ Failed to get temp unavailable statuses:', error)
+    return res.status(500).json({ error: 'Failed to get temp unavailable statuses' })
   }
 })
 

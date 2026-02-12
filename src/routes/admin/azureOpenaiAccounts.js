@@ -418,6 +418,10 @@ router.post('/migrate-api-keys-azure', authenticateAdmin, async (req, res) => {
 router.post('/azure-openai-accounts/:accountId/test', authenticateAdmin, async (req, res) => {
   const { accountId } = req.params
   const startTime = Date.now()
+  const {
+    createChatCompletionsTestPayload,
+    extractErrorMessage
+  } = require('../../utils/testPayloadHelper')
 
   try {
     // 获取账户信息
@@ -433,13 +437,12 @@ router.post('/azure-openai-accounts/:accountId/test', authenticateAdmin, async (
     }
 
     // 构造测试请求
-    const { createOpenAITestPayload } = require('../../utils/testPayloadHelper')
     const { getProxyAgent } = require('../../utils/proxyHelper')
 
     const deploymentName = account.deploymentName || 'gpt-4o-mini'
     const apiVersion = account.apiVersion || '2024-02-15-preview'
     const apiUrl = `${account.endpoint}/openai/deployments/${deploymentName}/chat/completions?api-version=${apiVersion}`
-    const payload = createOpenAITestPayload(deploymentName)
+    const payload = createChatCompletionsTestPayload(deploymentName)
 
     const requestConfig = {
       headers: {
@@ -488,7 +491,7 @@ router.post('/azure-openai-accounts/:accountId/test', authenticateAdmin, async (
     return res.status(500).json({
       success: false,
       error: 'Test failed',
-      message: error.response?.data?.error?.message || error.message,
+      message: extractErrorMessage(error.response?.data, error.message),
       latency
     })
   }
