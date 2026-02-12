@@ -67,14 +67,16 @@
             class="overflow-x-auto rounded bg-gray-900 p-2 font-mono text-xs text-green-400 sm:p-3 sm:text-sm"
           >
             <div class="whitespace-nowrap text-gray-300">{</div>
-            <div class="whitespace-nowrap text-gray-300">
-              &nbsp;&nbsp;"OPENAI_API_KEY": "后台创建的API密钥"
-            </div>
+            <div class="whitespace-nowrap text-gray-300">&nbsp;&nbsp;"OPENAI_API_KEY": null</div>
             <div class="whitespace-nowrap text-gray-300">}</div>
           </div>
           <div
             class="mt-3 rounded border border-red-200 bg-red-50 p-2 dark:border-red-500/40 dark:bg-red-950/30"
-          ></div>
+          >
+            <p class="text-sm font-semibold text-red-700 dark:text-red-300">
+              ⚠️ 必须将 OPENAI_API_KEY 设置为 null，否则 Codex 会优先使用它而忽略环境变量！
+            </p>
+          </div>
           <p class="mt-3 text-sm text-orange-600 dark:text-orange-400">一键写入命令：</p>
           <div
             class="mt-2 overflow-x-auto rounded bg-gray-900 p-2 font-mono text-xs text-green-400 sm:p-3 sm:text-sm"
@@ -82,6 +84,202 @@
             <div class="whitespace-nowrap text-gray-300">{{ authJsonWriteCmd }}</div>
           </div>
         </div>
+
+        <!-- 环境变量配置 -->
+        <div
+          class="rounded-lg border border-purple-200 bg-purple-50 p-3 dark:border-purple-500/40 dark:bg-purple-950/30 sm:p-4"
+        >
+          <h6 class="mb-2 font-medium text-purple-800 dark:text-purple-300">
+            3. 设置环境变量 CRS_OAI_KEY
+          </h6>
+          <p class="mb-3 text-sm text-purple-700 dark:text-purple-300">
+            设置环境变量 CRS_OAI_KEY 为您的 API 密钥（格式如 cr_xxxxxxxxxx）：
+          </p>
+
+          <!-- Windows -->
+          <template v-if="platform === 'windows'">
+            <p class="mb-1 text-sm text-purple-600 dark:text-purple-400">
+              系统级环境变量（推荐）：
+            </p>
+            <div
+              class="mb-3 overflow-x-auto rounded bg-gray-900 p-2 font-mono text-xs text-green-400 sm:p-3 sm:text-sm"
+            >
+              <div class="whitespace-nowrap text-gray-300">
+                [System.Environment]::SetEnvironmentVariable("CRS_OAI_KEY", "cr_xxxxxxxxxx",
+                [System.EnvironmentVariableTarget]::Machine)
+              </div>
+            </div>
+            <p class="mb-1 text-sm text-purple-600 line-through opacity-60 dark:text-purple-400">
+              用户级环境变量
+              <span class="text-xs text-red-500">（不推荐）</span>
+            </p>
+            <div
+              class="mb-3 overflow-x-auto rounded bg-gray-900 p-2 font-mono text-xs text-green-400 opacity-60 sm:p-3 sm:text-sm"
+            >
+              <div class="whitespace-nowrap text-gray-300 line-through">
+                [System.Environment]::SetEnvironmentVariable("CRS_OAI_KEY", "cr_xxxxxxxxxx",
+                [System.EnvironmentVariableTarget]::User)
+              </div>
+            </div>
+            <p class="text-sm text-purple-600 dark:text-purple-400">
+              💡 设置后需要重新打开终端窗口才能生效
+            </p>
+          </template>
+
+          <!-- macOS / Linux -->
+          <template v-else>
+            <p class="mb-1 text-sm text-purple-600 dark:text-purple-400">
+              检查当前 shell：<code class="rounded bg-purple-100 px-1 dark:bg-purple-900"
+                >echo $SHELL</code
+              >
+            </p>
+
+            <!-- 检查旧配置 -->
+            <details
+              class="my-3 rounded-lg border border-blue-200 bg-blue-50 dark:border-blue-500/40 dark:bg-blue-950/30"
+            >
+              <summary
+                class="cursor-pointer p-2 text-sm font-medium text-blue-800 dark:text-blue-300"
+              >
+                检查是否已有旧配置
+              </summary>
+              <div class="px-3 pb-3">
+                <p class="mb-2 text-sm text-blue-700 dark:text-blue-300">
+                  如果之前配置过，建议先检查并清理旧配置：
+                </p>
+                <div
+                  class="mb-2 overflow-x-auto rounded bg-gray-900 p-2 font-mono text-xs text-green-400 sm:p-3 sm:text-sm"
+                >
+                  <div class="text-gray-500"># zsh</div>
+                  <div class="whitespace-nowrap text-gray-300">grep 'CRS_OAI_KEY' ~/.zshrc</div>
+                  <div class="mt-1 text-gray-500"># bash</div>
+                  <div class="whitespace-nowrap text-gray-300">grep 'CRS_OAI_KEY' ~/.bashrc</div>
+                </div>
+                <p class="text-sm text-blue-600 dark:text-blue-400">
+                  如果有输出，说明已配置过，可以手动编辑文件修改或删除旧配置
+                </p>
+              </div>
+            </details>
+
+            <p class="mb-1 mt-2 text-sm text-purple-600 dark:text-purple-400">
+              {{ platform === 'macos' ? 'zsh (macOS 默认)' : 'bash (Linux 默认)' }}：
+            </p>
+            <div
+              class="mb-3 overflow-x-auto rounded bg-gray-900 p-2 font-mono text-xs text-green-400 sm:p-3 sm:text-sm"
+            >
+              <div class="whitespace-nowrap text-gray-300">
+                echo 'export CRS_OAI_KEY="cr_xxxxxxxxxx"' >>
+                {{
+                  platform === 'macos'
+                    ? '~/.zshrc && source ~/.zshrc'
+                    : '~/.bashrc && source ~/.bashrc'
+                }}
+              </div>
+            </div>
+
+            <p class="mb-1 text-sm text-purple-600 dark:text-purple-400">
+              {{ platform === 'macos' ? 'bash' : 'zsh' }}：
+            </p>
+            <div
+              class="mb-3 overflow-x-auto rounded bg-gray-900 p-2 font-mono text-xs text-green-400 sm:p-3 sm:text-sm"
+            >
+              <div class="whitespace-nowrap text-gray-300">
+                echo 'export CRS_OAI_KEY="cr_xxxxxxxxxx"' >>
+                {{
+                  platform === 'macos'
+                    ? '~/.bashrc && source ~/.bashrc'
+                    : '~/.zshrc && source ~/.zshrc'
+                }}
+              </div>
+            </div>
+
+            <p class="text-sm text-purple-600 dark:text-purple-400">
+              💡 设置后需要重新打开终端窗口或执行 source 命令才能生效
+            </p>
+          </template>
+        </div>
+
+        <!-- 验证环境变量 -->
+        <div
+          class="rounded-lg border border-green-200 bg-green-50 p-3 dark:border-green-500/40 dark:bg-green-950/30 sm:p-4"
+        >
+          <h6 class="mb-2 font-medium text-green-800 dark:text-green-300">4. 验证环境变量</h6>
+          <p class="mb-2 text-sm text-green-700 dark:text-green-300">
+            重新打开终端后，验证环境变量是否设置成功：
+          </p>
+          <div
+            class="overflow-x-auto rounded bg-gray-900 p-2 font-mono text-xs text-green-400 sm:p-3 sm:text-sm"
+          >
+            <div v-if="platform === 'windows'" class="whitespace-nowrap text-gray-300">
+              Get-ChildItem Env:CRS_OAI_KEY
+            </div>
+            <div v-else class="whitespace-nowrap text-gray-300">
+              echo "CRS_OAI_KEY: $CRS_OAI_KEY"
+            </div>
+          </div>
+        </div>
+
+        <!-- 删除环境变量 -->
+        <details
+          class="rounded-lg border border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-800"
+        >
+          <summary class="cursor-pointer p-3 text-sm font-medium text-gray-800 dark:text-gray-300">
+            如何删除环境变量
+          </summary>
+          <div class="px-3 pb-3">
+            <template v-if="platform === 'windows'">
+              <p class="mb-1 text-sm text-gray-600 dark:text-gray-400">删除用户级环境变量：</p>
+              <div
+                class="mb-2 overflow-x-auto rounded bg-gray-900 p-2 font-mono text-xs text-green-400 sm:p-3 sm:text-sm"
+              >
+                <div class="whitespace-nowrap text-gray-300">
+                  [System.Environment]::SetEnvironmentVariable("CRS_OAI_KEY", $null,
+                  [System.EnvironmentVariableTarget]::User)
+                </div>
+              </div>
+              <p class="mb-1 text-sm text-gray-600 dark:text-gray-400">删除系统级环境变量：</p>
+              <div
+                class="mb-2 overflow-x-auto rounded bg-gray-900 p-2 font-mono text-xs text-green-400 sm:p-3 sm:text-sm"
+              >
+                <div class="whitespace-nowrap text-gray-300">
+                  [System.Environment]::SetEnvironmentVariable("CRS_OAI_KEY", $null,
+                  [System.EnvironmentVariableTarget]::Machine)
+                </div>
+              </div>
+            </template>
+            <template v-else>
+              <p class="mb-1 text-sm text-gray-600 dark:text-gray-400">从 zsh 配置中删除：</p>
+              <div
+                class="mb-2 overflow-x-auto rounded bg-gray-900 p-2 font-mono text-xs text-green-400 sm:p-3 sm:text-sm"
+              >
+                <div class="text-gray-500"># 删除包含 CRS_OAI_KEY 的行</div>
+                <div class="whitespace-nowrap text-gray-300">
+                  sed -i '' '/CRS_OAI_KEY/d' ~/.zshrc && source ~/.zshrc
+                </div>
+              </div>
+              <p class="mb-1 text-sm text-gray-600 dark:text-gray-400">从 bash 配置中删除：</p>
+              <div
+                class="mb-2 overflow-x-auto rounded bg-gray-900 p-2 font-mono text-xs text-green-400 sm:p-3 sm:text-sm"
+              >
+                <div class="text-gray-500"># 删除包含 CRS_OAI_KEY 的行</div>
+                <div class="whitespace-nowrap text-gray-300">
+                  sed -i '' '/CRS_OAI_KEY/d' ~/.bashrc && source ~/.bashrc
+                </div>
+              </div>
+            </template>
+            <p class="mb-1 text-sm text-gray-600 dark:text-gray-400">验证是否删除成功：</p>
+            <div
+              class="overflow-x-auto rounded bg-gray-900 p-2 font-mono text-xs text-green-400 sm:p-3 sm:text-sm"
+            >
+              <div v-if="platform === 'windows'" class="whitespace-nowrap text-gray-300">
+                Get-ChildItem Env:CRS_OAI_KEY
+              </div>
+              <div v-else class="whitespace-nowrap text-gray-300">
+                echo "CRS_OAI_KEY: $CRS_OAI_KEY"
+              </div>
+            </div>
+          </div>
+        </details>
 
         <!-- 提示 -->
         <div
@@ -132,7 +330,8 @@ const configTomlLines = computed(() => [
   'name = "crs"',
   `base_url = "${openaiBaseUrl.value}"`,
   'wire_api = "responses"',
-  'requires_openai_auth = true'
+  'requires_openai_auth = true',
+  'env_key = "CRS_OAI_KEY"'
 ])
 
 const configTomlContent = computed(() => configTomlLines.value.join('\n'))
