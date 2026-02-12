@@ -16,13 +16,12 @@ const router = express.Router()
 // 📋 获取可用模型列表（公开接口）
 router.get('/models', async (req, res) => {
   const { service } = req.query
-  const forceRefresh = req.query.forceRefresh === '1' || req.query.forceRefresh === 'true'
 
   const getOpenAIModels = async () => {
     try {
       const accounts = await openaiResponsesAccountService.getAllAccounts()
       if (!Array.isArray(accounts) || accounts.length === 0) {
-        return modelsConfig.OPENAI_MODELS
+        return []
       }
 
       for (const account of accounts) {
@@ -34,7 +33,7 @@ router.get('/models', async (req, res) => {
           const dynamicModels = await openaiResponsesAccountService.fetchAvailableModels(
             account.id,
             {
-              forceRefresh
+              disableCache: true
             }
           )
           if (Array.isArray(dynamicModels) && dynamicModels.length > 0) {
@@ -51,7 +50,7 @@ router.get('/models', async (req, res) => {
       logger.warn('⚠️ Failed to load OpenAI-Responses accounts for dynamic models:', error.message)
     }
 
-    return modelsConfig.OPENAI_MODELS
+    return []
   }
 
   const openaiModels = await getOpenAIModels()

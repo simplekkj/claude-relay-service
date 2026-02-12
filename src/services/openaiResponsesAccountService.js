@@ -266,13 +266,13 @@ class OpenAIResponsesAccountService {
 
   // 🔗 拉取账户可用模型（带缓存）
   async fetchAvailableModels(accountId, options = {}) {
-    const { forceRefresh = false, ttlSeconds = 600 } = options
+    const { forceRefresh = false, ttlSeconds = 600, disableCache = false } = options
     const cacheTtlSeconds = Number.isFinite(Number(ttlSeconds))
       ? Math.max(1, Math.floor(Number(ttlSeconds)))
       : 600
 
     try {
-      if (!forceRefresh) {
+      if (!disableCache && !forceRefresh) {
         const cachedModels = await this._getCachedModels(accountId)
         if (Array.isArray(cachedModels) && cachedModels.length > 0) {
           return cachedModels
@@ -315,7 +315,9 @@ class OpenAIResponsesAccountService {
         throw new Error('No model ids found in upstream response')
       }
 
-      await this._setCachedModels(accountId, models, cacheTtlSeconds)
+      if (!disableCache) {
+        await this._setCachedModels(accountId, models, cacheTtlSeconds)
+      }
       return models
     } catch (error) {
       logger.warn(
@@ -323,10 +325,12 @@ class OpenAIResponsesAccountService {
         error.message
       )
 
-      const cachedModels = await this._getCachedModels(accountId)
-      if (Array.isArray(cachedModels) && cachedModels.length > 0) {
-        logger.info(`📦 Using cached OpenAI-Responses models for account ${accountId}`)
-        return cachedModels
+      if (!disableCache) {
+        const cachedModels = await this._getCachedModels(accountId)
+        if (Array.isArray(cachedModels) && cachedModels.length > 0) {
+          logger.info(`📦 Using cached OpenAI-Responses models for account ${accountId}`)
+          return cachedModels
+        }
       }
 
       throw error

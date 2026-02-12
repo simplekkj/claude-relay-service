@@ -34,9 +34,9 @@ class CodexCliValidator {
    */
   static validate(req) {
     try {
-      const userAgent = req.headers['user-agent'] || ''
-      const originator = req.headers['originator'] || ''
-      const sessionId = req.headers['session_id']
+      const headers = req.headers || {}
+      const userAgent = headers['user-agent'] || ''
+      const sessionId = headers['session_id'] || headers['x-session-id']
 
       // 1. 基础 User-Agent 检查
       // Codex CLI 的 UA 格式:
@@ -51,14 +51,15 @@ class CodexCliValidator {
         return false
       }
 
-      // 2. 对于特定路径，进行额外的严格验证
-      // 对于 /openai 和 /azure 路径需要完整验证
-      const strictValidationPaths = ['/openai', '/azure']
+      // 2. 对于 /openai 和 /azure 路径做基础额外校验（与官方协议保持松耦合）
+      const normalizedPath = String(req.originalUrl || req.path || '').toLowerCase()
       const needsStrictValidation =
-        req.path && strictValidationPaths.some((path) => req.path.startsWith(path))
-      const normalizedPath = (req.path || '').toLowerCase()
+        normalizedPath.startsWith('/openai') || normalizedPath.startsWith('/azure')
       const isModelsCatalogPath =
-        normalizedPath.includes('/openai/models') || normalizedPath.includes('/openai/v1/models')
+        normalizedPath.startsWith('/openai/models') ||
+        normalizedPath.startsWith('/openai/v1/models') ||
+        normalizedPath.startsWith('/azure/models') ||
+        normalizedPath.startsWith('/azure/v1/models')
 
       if (!needsStrictValidation) {
         // 其他路径，只要 User-Agent 匹配就认为是 Codex CLI
@@ -66,17 +67,7 @@ class CodexCliValidator {
         return true
       }
 
-      // 3. 验证 originator 头必须与 UA 中的客户端类型匹配
-      const clientType = uaMatch[1].toLowerCase()
-      if (originator.toLowerCase() !== clientType) {
-        logger.debug(
-          `Codex CLI validation failed - originator mismatch. UA: ${clientType}, originator: ${originator}`
-        )
-        return false
-      }
-
-      // 4. 检查 session_id - responses 路径必须存在且长度大于20
-      // models 目录请求不会携带 session_id，避免误判
+      // 3. 非 models 请求要求 session_id 基本有效，避免明显伪造流量
       if (!isModelsCatalogPath) {
         if (!sessionId || sessionId.length <= 20) {
           logger.debug(
@@ -86,33 +77,7 @@ class CodexCliValidator {
         }
       }
 
-      // 5. 对于 /openai/responses 和 /azure/response 路径，额外检查 body 中的 instructions 字段
-      if (
-        req.path &&
-        (req.path.includes('/openai/responses') || req.path.includes('/azure/response'))
-      ) {
-        if (!req.body || !req.body.instructions) {
-          logger.debug(`Codex CLI validation failed - missing instructions in body for ${req.path}`)
-          return false
-        }
-
-        const expectedPrefix =
-          'You are Codex, based on GPT-5. You are running as a coding agent in the Codex CLI'
-        if (!req.body.instructions.startsWith(expectedPrefix)) {
-          logger.debug(`Codex CLI validation failed - invalid instructions prefix for ${req.path}`)
-          logger.debug(`Expected: "${expectedPrefix}..."`)
-          logger.debug(`Received: "${req.body.instructions.substring(0, 100)}..."`)
-          return false
-        }
-
-        // 额外检查 model 字段应该是 gpt-5-codex
-        if (req.body.model && req.body.model !== 'gpt-5-codex') {
-          logger.debug(`Codex CLI validation warning - unexpected model: ${req.body.model}`)
-          // 只记录警告，不拒绝请求
-        }
-      }
-
-      // 所有必要检查通过
+      // 所有必要检查通过（originator / instructions 保持透传，不做强绑定）
       logger.debug(`Codex CLI validation passed for UA: ${userAgent}`)
       return true
     } catch (error) {

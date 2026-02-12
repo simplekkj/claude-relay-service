@@ -176,7 +176,7 @@ describe('openaiRoutes /model protocol alignment', () => {
     expect(forwardedReq.body.model).toBe('gpt-5-2025-08-07')
   })
 
-  it('returns explicit unavailable error for /models on openai-responses accounts', async () => {
+  it('forwards /v1/memories/trace_summarize to openai-responses relay without responses-only mutation', async () => {
     mockSelectAccountForApiKey.mockResolvedValue({
       accountId: 'responses-1',
       accountType: 'openai-responses'
@@ -186,10 +186,129 @@ describe('openaiRoutes /model protocol alignment', () => {
       name: 'responses-account',
       apiKey: 'resp-key'
     })
+    mockRelayHandleRequest.mockResolvedValue({ ok: true })
 
     const req = {
-      headers: {},
-      query: {},
+      headers: {
+        'user-agent': 'codex_cli_rs/0.0.1',
+        originator: 'codex_cli_rs',
+        session_id: '123456789012345678901'
+      },
+      body: {
+        model: 'gpt-5-codex',
+        traces: [
+          {
+            id: 'trace-1',
+            metadata: { source_path: '/tmp/trace.json' },
+            items: [{ type: 'message', role: 'user', content: [] }]
+          }
+        ]
+      },
+      apiKey: buildApiKey(),
+      path: '/v1/memories/trace_summarize',
+      originalUrl: '/v1/memories/trace_summarize',
+      on: jest.fn()
+    }
+    const res = createMockRes()
+
+    await handleResponses(req, res)
+
+    expect(mockRelayHandleRequest).toHaveBeenCalledTimes(1)
+    const forwardedReq = mockRelayHandleRequest.mock.calls[0][0]
+    expect(forwardedReq.body).toMatchObject({
+      model: 'gpt-5-codex'
+    })
+    expect(forwardedReq.body.store).toBeUndefined()
+    expect(forwardedReq.body.instructions).toBeUndefined()
+  })
+
+  it('routes /v1/memories/trace_summarize to codex memories endpoint for openai accounts', async () => {
+    mockSelectAccountForApiKey.mockResolvedValue({
+      accountId: 'openai-1',
+      accountType: 'openai'
+    })
+    mockGetOpenAIAccount.mockResolvedValue({
+      id: 'openai-1',
+      accountId: 'chatgpt-user-1',
+      name: 'openai-account',
+      accessToken: 'encrypted-token'
+    })
+    mockDecryptOpenAIAccount.mockReturnValue('decrypted-token')
+    mockAxiosPost.mockResolvedValue({
+      status: 200,
+      data: {
+        output: []
+      },
+      headers: {}
+    })
+
+    const req = {
+      headers: {
+        'user-agent': 'codex_cli_rs/0.0.1',
+        originator: 'codex_cli_rs',
+        session_id: '123456789012345678901',
+        'x-openai-internal-codex-residency': 'us'
+      },
+      body: {
+        model: 'gpt-5-codex',
+        traces: [
+          {
+            id: 'trace-1',
+            metadata: { source_path: '/tmp/trace.json' },
+            items: [{ type: 'message', role: 'user', content: [] }]
+          }
+        ]
+      },
+      apiKey: buildApiKey(),
+      path: '/v1/memories/trace_summarize',
+      originalUrl: '/v1/memories/trace_summarize',
+      on: jest.fn()
+    }
+    const res = createMockRes()
+
+    await handleResponses(req, res)
+
+    expect(mockAxiosPost).toHaveBeenCalledTimes(1)
+    expect(mockAxiosPost.mock.calls[0][0]).toBe(
+      'https://chatgpt.com/backend-api/codex/memories/trace_summarize'
+    )
+    expect(mockAxiosPost.mock.calls[0][2].headers).toMatchObject({
+      originator: 'codex_cli_rs',
+      session_id: '123456789012345678901',
+      'x-openai-internal-codex-residency': 'us'
+    })
+  })
+
+  it('loads authoritative /models from openai-responses account baseApi', async () => {
+    mockSelectAccountForApiKey.mockResolvedValue({
+      accountId: 'responses-1',
+      accountType: 'openai-responses'
+    })
+    mockGetOpenAIResponsesAccount.mockResolvedValue({
+      id: 'responses-1',
+      name: 'responses-account',
+      apiKey: 'resp-key',
+      baseApi: 'https://api.openai.com/v1'
+    })
+    mockAxiosGet.mockResolvedValue({
+      status: 200,
+      data: {
+        data: [
+          { id: 'gpt-5-codex' },
+          { id: 'gpt-5-codex-mini' }
+        ]
+      },
+      headers: {}
+    })
+
+    const req = {
+      headers: {
+        originator: 'codex_cli_rs',
+        'x-openai-internal-codex-residency': 'us'
+      },
+      query: {
+        client_version: '0.99.0'
+      },
       body: {},
       apiKey: buildApiKey()
     }
@@ -197,12 +316,18 @@ describe('openaiRoutes /model protocol alignment', () => {
 
     await handleCodexModels(req, res)
 
-    expect(res.statusCode).toBe(503)
-    expect(res.payload).toMatchObject({
-      error: {
-        type: 'service_unavailable',
-        code: 'models_catalog_unavailable'
-      }
+    expect(res.statusCode).toBe(200)
+    expect(res.payload.models.map((item) => item.slug)).toEqual(['gpt-5-codex', 'gpt-5-codex-mini'])
+    expect(mockAxiosGet).toHaveBeenCalledTimes(1)
+    expect(mockRedisGet).not.toHaveBeenCalled()
+    expect(mockRedisSetex).not.toHaveBeenCalled()
+    expect(mockAxiosGet.mock.calls[0][0]).toBe(
+      'https://api.openai.com/v1/models?client_version=0.99.0'
+    )
+    expect(mockAxiosGet.mock.calls[0][1].headers).toMatchObject({
+      authorization: 'Bearer resp-key',
+      originator: 'codex_cli_rs',
+      'x-openai-internal-codex-residency': 'us'
     })
   })
 
