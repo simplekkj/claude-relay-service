@@ -80,6 +80,35 @@ function isRateLimitErrorPayload(errorPayload) {
   return message.includes('rate limit') || message.includes('too many requests')
 }
 
+const UPSTREAM_PASS_THROUGH_HEADER_KEYS = new Set([
+  'openai-version',
+  'x-request-id',
+  'openai-processing-ms',
+  'retry-after',
+  'x-models-etag',
+  'x-reasoning-included',
+  'etag'
+])
+
+function shouldPassThroughUpstreamHeader(lowerKey) {
+  return (
+    UPSTREAM_PASS_THROUGH_HEADER_KEYS.has(lowerKey) ||
+    lowerKey.startsWith('x-codex-') ||
+    lowerKey.startsWith('x-responsesapi-') ||
+    lowerKey.startsWith('x-ratelimit-')
+  )
+}
+
+function applyUpstreamHeaders(res, headers = {}) {
+  for (const [key, value] of Object.entries(headers || {})) {
+    const lowerKey = key.toLowerCase()
+    if (!shouldPassThroughUpstreamHeader(lowerKey) || value === undefined) {
+      continue
+    }
+    res.setHeader(lowerKey, value)
+  }
+}
+
 class OpenAIResponsesRelayService {
   constructor() {
     this.defaultTimeout = config.requestTimeout || 600000
@@ -513,6 +542,7 @@ class OpenAIResponsesRelayService {
     res.setHeader('Cache-Control', 'no-cache')
     res.setHeader('Connection', 'keep-alive')
     res.setHeader('X-Accel-Buffering', 'no')
+    applyUpstreamHeaders(res, response.headers)
 
     let usageData = null
     let actualModel = null
@@ -750,6 +780,7 @@ class OpenAIResponsesRelayService {
   // 处理非流式响应
   async _handleNormalResponse(response, res, account, apiKeyData, requestedModel) {
     const responseData = response.data
+    applyUpstreamHeaders(res, response.headers)
 
     // 提取 usage 数据和实际 model
     // 支持两种格式：直接的 usage 或嵌套在 response 中的 usage
