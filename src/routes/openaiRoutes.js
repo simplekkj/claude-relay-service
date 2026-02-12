@@ -9,7 +9,6 @@ const openaiAccountService = require('../services/openaiAccountService')
 const openaiResponsesAccountService = require('../services/openaiResponsesAccountService')
 const openaiResponsesRelayService = require('../services/openaiResponsesRelayService')
 const apiKeyService = require('../services/apiKeyService')
-const modelService = require('../services/modelService')
 const redis = require('../models/redis')
 const crypto = require('crypto')
 const ProxyHelper = require('../utils/proxyHelper')
@@ -41,6 +40,7 @@ const CODEX_BASE_INSTRUCTIONS = 'You are Codex, based on GPT-5.'
 const OPENAI_CODEX_MODELS_ENDPOINT = 'https://chatgpt.com/backend-api/codex/models'
 const DYNAMIC_OPENAI_MODELS_CACHE_PREFIX = 'openai_codex_models_catalog:'
 const DYNAMIC_OPENAI_MODELS_CACHE_TTL_SECONDS = 600
+const MODELS_CATALOG_UNAVAILABLE_CODE = 'models_catalog_unavailable'
 const MODELS_FORWARD_HEADER_KEYS = [
   'version',
   'openai-version',
@@ -355,18 +355,6 @@ function normalizeDynamicModelsPayload(payload) {
   })
 }
 
-function getStaticOpenAIModelInfos(apiKeyData) {
-  const modelIds = modelService
-    .getModelsByProvider('openai')
-    .map((model) => model.id)
-    .filter((modelId) => typeof modelId === 'string' && modelId.trim())
-  const dedupedModelIds = Array.from(new Set(modelIds))
-  const modelInfos = dedupedModelIds.map((modelId, index) =>
-    buildCodexModelInfo(modelId, index + 1)
-  )
-  return filterModelsByApiKeyRestriction(modelInfos, apiKeyData)
-}
-
 function filterModelsByApiKeyRestriction(models, apiKeyData) {
   if (
     !apiKeyData?.enableModelRestriction ||
@@ -484,20 +472,14 @@ async function fetchCodexModelsFromOpenAIAccount(authContext, req, forceRefresh 
 }
 
 async function fetchCodexModelsFromOpenAIResponsesAccount(authContext, forceRefresh = false) {
-  const entries = await openaiResponsesAccountService.fetchAvailableModels(authContext.accountId, {
-    forceRefresh,
-    ttlSeconds: DYNAMIC_OPENAI_MODELS_CACHE_TTL_SECONDS
-  })
-
-  const modelIds = Array.from(
-    new Set(
-      entries
-        .map((entry) => entry?.value || entry?.id || entry?.label)
-        .filter((modelId) => typeof modelId === 'string' && modelId.trim())
-    )
+  void authContext
+  void forceRefresh
+  const error = new Error(
+    'OpenAI-Responses accounts do not expose authoritative Codex /models metadata'
   )
-
-  return modelIds.map((modelId, index) => buildCodexModelInfo(modelId, index + 1))
+  error.code = MODELS_CATALOG_UNAVAILABLE_CODE
+  error.statusCode = 503
+  throw error
 }
 
 async function fetchDynamicCodexModelInfos(authContext, req, forceRefresh = false) {
@@ -505,6 +487,25 @@ async function fetchDynamicCodexModelInfos(authContext, req, forceRefresh = fals
     return fetchCodexModelsFromOpenAIResponsesAccount(authContext, forceRefresh)
   }
   return fetchCodexModelsFromOpenAIAccount(authContext, req, forceRefresh)
+}
+
+function buildModelsCatalogUnavailablePayload(accountType, error) {
+  const accountTypeLabel =
+    typeof accountType === 'string' && accountType.trim() ? accountType.trim() : 'unknown'
+  const reason = typeof error?.message === 'string' && error.message.trim() ? error.message : null
+  const message =
+    accountTypeLabel === 'openai-responses'
+      ? 'The selected account type cannot provide Codex /models metadata required by /model. Bind an OpenAI ChatGPT account to use /model.'
+      : reason
+        ? `Failed to load authoritative Codex /models metadata: ${reason}`
+        : 'Failed to load authoritative Codex /models metadata.'
+  return {
+    error: {
+      message,
+      type: 'service_unavailable',
+      code: MODELS_CATALOG_UNAVAILABLE_CODE
+    }
+  }
 }
 
 async function handleCodexModels(req, res) {
@@ -525,19 +526,24 @@ async function handleCodexModels(req, res) {
     const requestedModelHint =
       typeof req.query?.model === 'string' && req.query.model.trim() ? req.query.model.trim() : null
     const forceRefresh = shouldForceModelRefresh(req.query)
+    let authContext = null
 
     let modelInfos = []
     try {
-      const authContext = await getOpenAIAuthToken(apiKeyData, sessionId, requestedModelHint)
+      authContext = await getOpenAIAuthToken(apiKeyData, sessionId, requestedModelHint)
       modelInfos = await fetchDynamicCodexModelInfos(authContext, req, forceRefresh)
       logger.info(
         `📋 Loaded dynamic OpenAI model catalog from ${authContext.accountType}:${authContext.accountId} (${modelInfos.length} models)`
       )
     } catch (dynamicError) {
       logger.warn(
-        `⚠️ Failed to load dynamic OpenAI model catalog, falling back to static list: ${dynamicError.message}`
+        `⚠️ Failed to load authoritative OpenAI model catalog from ${authContext?.accountType || 'unknown'}:${authContext?.accountId || 'unknown'}: ${dynamicError.message}`
       )
-      modelInfos = getStaticOpenAIModelInfos(apiKeyData)
+      const statusCode = Number(dynamicError?.statusCode)
+      const status = Number.isFinite(statusCode) ? Math.max(400, Math.trunc(statusCode)) : 503
+      return res
+        .status(status)
+        .json(buildModelsCatalogUnavailablePayload(authContext?.accountType, dynamicError))
     }
 
     modelInfos = filterModelsByApiKeyRestriction(modelInfos, apiKeyData)
@@ -969,16 +975,7 @@ const handleResponses = async (req, res) => {
     sessionHash = sessionId ? crypto.createHash('sha256').update(sessionId).digest('hex') : null
 
     // 从请求体中提取模型和流式标志
-    let requestedModel = req.body?.model || null
-    const isCodexModel =
-      typeof requestedModel === 'string' && requestedModel.toLowerCase().includes('codex')
-
-    // 如果模型是 gpt-5 开头且后面还有内容（如 gpt-5-2025-08-07），并且不是 Codex 系列，则覆盖为 gpt-5
-    if (requestedModel && requestedModel.startsWith('gpt-5-') && !isCodexModel) {
-      logger.info(`📝 Model ${requestedModel} detected, normalizing to gpt-5 for Codex API`)
-      requestedModel = 'gpt-5'
-      req.body.model = 'gpt-5' // 同时更新请求体中的模型
-    }
+    const requestedModel = req.body?.model || null
 
     // 判断是否为 Codex CLI 的请求（基于 User-Agent）
     // 支持: codex_vscode, codex_cli_rs, codex_exec (非交互式/脚本模式)
@@ -1716,3 +1713,7 @@ router.get('/key-info', authenticateApiKey, async (req, res) => {
 
 module.exports = router
 module.exports.handleResponses = handleResponses
+module.exports.__testables = {
+  handleCodexModels,
+  buildModelsCatalogUnavailablePayload
+}
