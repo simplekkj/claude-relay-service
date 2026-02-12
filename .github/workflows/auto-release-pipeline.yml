@@ -6,6 +6,10 @@ on:
       - main
   workflow_dispatch:  # 支持手动触发
 
+concurrency:
+  group: auto-release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
   packages: write
@@ -39,8 +43,11 @@ jobs:
       if: steps.check.outputs.needs_bump == 'true'
       id: get_version
       run: |
-        # 获取最新的tag版本
-        LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+        # 获取全局最高语义化tag版本（而不是当前分支最近祖先tag）
+        LATEST_TAG=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1)
+        if [ -z "$LATEST_TAG" ]; then
+          LATEST_TAG="v0.0.0"
+        fi
         echo "Latest tag: $LATEST_TAG"
         TAG_VERSION=${LATEST_TAG#v}
         
@@ -77,6 +84,14 @@ jobs:
         # 默认递增patch版本
         NEW_PATCH=$((PATCH + 1))
         NEW_VERSION="${MAJOR}.${MINOR}.${NEW_PATCH}"
+
+        # 若tag已存在（本地或远端），继续递增直到找到可用版本
+        while git rev-parse -q --verify "refs/tags/v${NEW_VERSION}" >/dev/null || \
+              git ls-remote --tags origin "refs/tags/v${NEW_VERSION}" | grep -q .; do
+          echo "Tag v${NEW_VERSION} already exists, bumping patch..."
+          NEW_PATCH=$((NEW_PATCH + 1))
+          NEW_VERSION="${MAJOR}.${MINOR}.${NEW_PATCH}"
+        done
         
         echo "New version: $NEW_VERSION"
         echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
@@ -195,6 +210,10 @@ jobs:
       if: steps.check.outputs.needs_bump == 'true'
       run: |
         NEW_TAG="${{ steps.next_version.outputs.new_tag }}"
+        if git ls-remote --tags origin "refs/tags/${NEW_TAG}" | grep -q .; then
+          echo "Tag ${NEW_TAG} already exists on remote, skip creating duplicate tag."
+          exit 0
+        fi
         git tag -a "$NEW_TAG" -m "Release $NEW_TAG"
         git push origin "$NEW_TAG"
 
