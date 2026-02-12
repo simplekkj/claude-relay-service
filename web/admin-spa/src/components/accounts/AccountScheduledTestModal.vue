@@ -222,6 +222,7 @@
 import { ref, watch } from 'vue'
 import { APP_CONFIG } from '@/utils/tools'
 import { showToast } from '@/utils/tools'
+import { getModelsApi } from '@/utils/http_apis'
 
 const props = defineProps({
   show: {
@@ -256,12 +257,31 @@ const cronPresets = [
   { label: '工作日 9:00', value: '0 9 * * 1-5' }
 ]
 
-// 模型选项
-const modelOptions = [
+// 模型选项（从 API 动态获取）
+const modelOptions = ref([
   { label: 'Claude Sonnet 4.5', value: 'claude-sonnet-4-5-20250929' },
   { label: 'Claude Haiku 4.5', value: 'claude-haiku-4-5-20251001' },
   { label: 'Claude Opus 4.5', value: 'claude-opus-4-5-20251101' }
-]
+])
+
+async function loadModels() {
+  try {
+    const result = await getModelsApi()
+    if (result.success && result.data) {
+      const platform = props.account?.platform
+      const mappedModels = result.data.platforms?.[platform]
+      const fallbackModels = result.data.claude
+
+      if (Array.isArray(mappedModels) && mappedModels.length > 0) {
+        modelOptions.value = mappedModels
+      } else if (Array.isArray(fallbackModels) && fallbackModels.length > 0) {
+        modelOptions.value = fallbackModels
+      }
+    }
+  } catch (err) {
+    // keep default model options when API fetch fails
+  }
+}
 
 // 格式化时间戳
 function formatTimestamp(timestamp) {
@@ -395,6 +415,7 @@ watch(
         model: 'claude-sonnet-4-5-20250929'
       }
       testHistory.value = []
+      loadModels()
       loadConfig()
     }
   }

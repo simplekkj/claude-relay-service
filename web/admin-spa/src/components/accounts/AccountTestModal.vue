@@ -200,6 +200,7 @@
 <script setup>
 import { ref, computed, watch, onUnmounted } from 'vue'
 import { APP_CONFIG } from '@/utils/tools'
+import { getModelsApi } from '@/utils/http_apis'
 
 const props = defineProps({
   show: {
@@ -222,12 +223,41 @@ const testDuration = ref(0)
 const testStartTime = ref(null)
 const eventSource = ref(null)
 const selectedModel = ref('')
+const modelsFromApi = ref({ claude: [], gemini: [], openai: [], platforms: {} })
+
+async function loadModels() {
+  try {
+    const result = await getModelsApi()
+    if (result.success && result.data) {
+      modelsFromApi.value = {
+        claude: result.data.claude || [],
+        gemini: result.data.gemini || [],
+        openai: result.data.openai || [],
+        platforms: result.data.platforms || {}
+      }
+    }
+  } catch {
+    // keep local fallback lists when API fetch fails
+  }
+}
 
 // 可用模型列表 - 根据账户类型
 const availableModels = computed(() => {
   if (!props.account) return []
   const platform = props.account.platform
-  const modelLists = {
+
+  if (platform === 'azure-openai') {
+    return [props.account.deploymentName || 'gpt-4o-mini']
+  }
+
+  const platformModels = modelsFromApi.value.platforms?.[platform]
+  if (Array.isArray(platformModels) && platformModels.length > 0) {
+    return platformModels
+      .map((m) => (typeof m === 'string' ? m : m?.value))
+      .filter((m) => typeof m === 'string' && m.length > 0)
+  }
+
+  const fallbackModelLists = {
     claude: ['claude-sonnet-4-5-20250929', 'claude-sonnet-4-20250514', 'claude-3-5-haiku-20241022'],
     'claude-console': [
       'claude-sonnet-4-5-20250929',
@@ -235,34 +265,55 @@ const availableModels = computed(() => {
       'claude-3-5-haiku-20241022'
     ],
     bedrock: [
-      'claude-sonnet-4-5-20250929',
-      'claude-sonnet-4-20250514',
-      'claude-3-5-haiku-20241022'
+      'us.anthropic.claude-opus-4-6-20250610-v1:0',
+      'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+      'us.anthropic.claude-sonnet-4-20250514-v1:0',
+      'us.anthropic.claude-3-5-haiku-20241022-v1:0'
     ],
-    gemini: ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'],
-    'openai-responses': ['gpt-4o-mini', 'gpt-4o', 'o3-mini'],
-    'azure-openai': [props.account.deploymentName || 'gpt-4o-mini'],
-    droid: ['claude-sonnet-4-20250514', 'claude-3-5-haiku-20241022'],
-    ccr: ['claude-sonnet-4-20250514', 'claude-3-5-haiku-20241022']
+    gemini: ['gemini-2.5-pro', 'gemini-2.5-flash'],
+    'openai-responses': ['gpt-5', 'gpt-5-mini', 'gpt-5-nano'],
+    droid: ['claude-sonnet-4-5-20250929', 'claude-sonnet-4-20250514', 'claude-3-5-haiku-20241022'],
+    ccr: ['claude-sonnet-4-5-20250929', 'claude-sonnet-4-20250514', 'claude-3-5-haiku-20241022']
   }
-  return modelLists[platform] || []
+  return fallbackModelLists[platform] || []
 })
 
 // 默认测试模型
 const defaultModel = computed(() => {
   if (!props.account) return ''
   const platform = props.account.platform
-  const models = {
+
+  if (platform === 'azure-openai') {
+    return props.account.deploymentName || 'gpt-4o-mini'
+  }
+
+  if (platform === 'bedrock') {
+    const preferredModel =
+      props.account.credentialType === 'bearer_token'
+        ? 'us.anthropic.claude-sonnet-4-5-20250929-v1:0'
+        : 'us.anthropic.claude-3-5-haiku-20241022-v1:0'
+    if (availableModels.value.includes(preferredModel)) {
+      return preferredModel
+    }
+  }
+
+  if (availableModels.value.length > 0) {
+    return availableModels.value[0]
+  }
+
+  const fallbackModels = {
     claude: 'claude-sonnet-4-5-20250929',
     'claude-console': 'claude-sonnet-4-5-20250929',
-    bedrock: 'claude-sonnet-4-5-20250929',
-    gemini: 'gemini-2.5-flash',
-    'openai-responses': 'gpt-4o-mini',
-    'azure-openai': props.account.deploymentName || 'gpt-4o-mini',
-    droid: 'claude-sonnet-4-20250514',
-    ccr: 'claude-sonnet-4-20250514'
+    bedrock:
+      props.account.credentialType === 'bearer_token'
+        ? 'us.anthropic.claude-sonnet-4-5-20250929-v1:0'
+        : 'us.anthropic.claude-3-5-haiku-20241022-v1:0',
+    gemini: 'gemini-2.5-pro',
+    'openai-responses': 'gpt-5',
+    droid: 'claude-sonnet-4-5-20250929',
+    ccr: 'claude-sonnet-4-5-20250929'
   }
-  return models[platform] || ''
+  return fallbackModels[platform] || ''
 })
 
 // 监听账户变化，重置选中的模型
@@ -620,27 +671,15 @@ function handleClose() {
 // 监听show变化，重置状态并设置测试模型
 watch(
   () => props.show,
-  (newVal) => {
+  async (newVal) => {
     if (newVal) {
       testStatus.value = 'idle'
       responseText.value = ''
       errorMessage.value = ''
       testDuration.value = 0
 
-      // 根据平台和账号类型设置测试模型
-      if (props.account?.platform === 'bedrock') {
-        const credentialType = props.account.credentialType
-        if (credentialType === 'bearer_token') {
-          // Bearer Token 模式使用 Sonnet 4.5
-          selectedModel.value = 'us.anthropic.claude-sonnet-4-5-20250929-v1:0'
-        } else {
-          // Access Key 模式使用 Haiku（更快更便宜）
-          selectedModel.value = 'us.anthropic.claude-3-5-haiku-20241022-v1:0'
-        }
-      } else {
-        // 其他平台使用默认模型
-        selectedModel.value = 'claude-sonnet-4-5-20250929'
-      }
+      await loadModels()
+      selectedModel.value = defaultModel.value
     }
   }
 )
