@@ -56,9 +56,6 @@ class CodexCliValidator {
       const strictValidationPaths = ['/openai', '/azure']
       const needsStrictValidation =
         req.path && strictValidationPaths.some((path) => req.path.startsWith(path))
-      const normalizedPath = (req.path || '').toLowerCase()
-      const isModelsCatalogPath =
-        normalizedPath.includes('/openai/models') || normalizedPath.includes('/openai/v1/models')
 
       if (!needsStrictValidation) {
         // 其他路径，只要 User-Agent 匹配就认为是 Codex CLI
@@ -75,15 +72,10 @@ class CodexCliValidator {
         return false
       }
 
-      // 4. 检查 session_id - responses 路径必须存在且长度大于20
-      // models 目录请求不会携带 session_id，避免误判
-      if (!isModelsCatalogPath) {
-        if (!sessionId || sessionId.length <= 20) {
-          logger.debug(
-            `Codex CLI validation failed - session_id missing or too short: ${sessionId}`
-          )
-          return false
-        }
+      // 4. 检查 session_id - 必须存在且长度大于20
+      if (!sessionId || sessionId.length <= 20) {
+        logger.debug(`Codex CLI validation failed - session_id missing or too short: ${sessionId}`)
+        return false
       }
 
       // 5. 对于 /openai/responses 和 /azure/response 路径，额外检查 body 中的 instructions 字段

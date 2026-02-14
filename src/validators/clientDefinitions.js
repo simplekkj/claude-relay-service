@@ -56,8 +56,6 @@ const CLIENT_DEFINITIONS = {
     allowedPathPrefixes: [
       '/openai/responses',
       '/openai/v1/responses',
-      '/openai/models',
-      '/openai/v1/models',
       '/azure/'
     ]
   },
