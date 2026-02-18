@@ -883,32 +883,43 @@ class UnifiedOpenAIScheduler {
           (account.isActive === true || account.isActive === 'true') &&
           account.status !== 'error'
         ) {
-          const readiness = await this._ensureAccountReadyForScheduling(account, account.id, {
-            sanitized: false
-          })
+          if (accountType === 'openai') {
+            const readiness = await this._ensureAccountReadyForScheduling(account, account.id, {
+              sanitized: false
+            })
 
-          if (!readiness.canUse) {
-            if (readiness.reason === 'rate_limited') {
-              logger.debug(
-                `⏭️ Skipping group member ${accountType} account ${account.name} - still rate limited`
-              )
-            } else {
-              logger.debug(
-                `⏭️ Skipping group member ${accountType} account ${account.name} - not schedulable`
-              )
+            if (!readiness.canUse) {
+              if (readiness.reason === 'rate_limited') {
+                logger.debug(
+                  `⏭️ Skipping group member ${accountType} account ${account.name} - still rate limited`
+                )
+              } else {
+                logger.debug(
+                  `⏭️ Skipping group member ${accountType} account ${account.name} - not schedulable`
+                )
+              }
+              continue
             }
-            continue
-          }
 
-          const isTempUnavailable = await upstreamErrorHelper.isTempUnavailable(
-            account.id,
-            accountType
-          )
-          if (isTempUnavailable) {
-            logger.debug(
-              `⏭️ Skipping group member ${accountType} account ${account.name} - temporarily unavailable`
+            const isTempUnavailable = await upstreamErrorHelper.isTempUnavailable(
+              account.id,
+              accountType
             )
-            continue
+            if (isTempUnavailable) {
+              logger.debug(
+                `⏭️ Skipping group member ${accountType} account ${account.name} - temporarily unavailable`
+              )
+              continue
+            }
+          } else {
+            // OpenAI-Responses 使用自身可用性检查，避免误用 OpenAI OAuth 的限流判定逻辑
+            const isAvailable = await this._isAccountAvailable(account.id, accountType)
+            if (!isAvailable) {
+              logger.debug(
+                `⏭️ Skipping group member ${accountType} account ${account.name} - unavailable`
+              )
+              continue
+            }
           }
 
           // 检查token是否过期（仅对 OpenAI OAuth 账户检查）

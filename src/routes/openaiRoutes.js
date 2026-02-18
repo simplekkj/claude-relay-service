@@ -12,6 +12,7 @@ const apiKeyService = require('../services/apiKeyService')
 const redis = require('../models/redis')
 const crypto = require('crypto')
 const ProxyHelper = require('../utils/proxyHelper')
+const upstreamErrorHelper = require('../utils/upstreamErrorHelper')
 const { updateRateLimitCounters } = require('../utils/rateLimitHelper')
 const { IncrementalSSEParser } = require('../utils/sseParser')
 const { getSafeMessage } = require('../utils/errorSanitizer')
@@ -227,6 +228,7 @@ const handleResponses = async (req, res) => {
   let proxy = null
   let accessToken = null
   let failoverAttempts = 0
+  let failoverTriggered = false
 
   try {
     // 从中间件获取 API Key 数据
@@ -306,21 +308,45 @@ const handleResponses = async (req, res) => {
     while (failoverAttempts < OPENAI_429_FAILOVER_ATTEMPTS) {
       failoverAttempts += 1
 
-      // 使用调度器选择账户
-      ;({ accessToken, accountId, accountType, proxy, account } = await getOpenAIAuthToken(
-        apiKeyData,
-        sessionId,
-        requestedModel
-      ))
+      try {
+        // 使用调度器选择账户
+        ;({ accessToken, accountId, accountType, proxy, account } = await getOpenAIAuthToken(
+          apiKeyData,
+          sessionId,
+          requestedModel
+        ))
+      } catch (selectionError) {
+        const selectionStatus =
+          selectionError?.statusCode || selectionError?.response?.status || null
+        if (selectionStatus === 402 && failoverTriggered) {
+          logger.warn(
+            `⚠️ OpenAI account pool exhausted after failover ${failoverAttempts}/${OPENAI_429_FAILOVER_ATTEMPTS}, returning 429`
+          )
+          return res.status(429).json({
+            error: {
+              type: 'usage_limit_reached',
+              message: 'No available OpenAI account after failover attempts'
+            }
+          })
+        }
+        throw selectionError
+      }
 
       // 如果是 OpenAI-Responses 账户，使用专门的中继服务处理
       if (accountType === 'openai-responses') {
         logger.info(`🔀 Using OpenAI-Responses relay service for account: ${account.name}`)
-        const relayResult = await openaiResponsesRelayService.handleRequest(req, res, account, apiKeyData, {
-          return429ForFailover: true
-        })
+        const relayResult = await openaiResponsesRelayService.handleRequest(
+          req,
+          res,
+          account,
+          apiKeyData,
+          {
+            return429ForFailover: true
+          }
+        )
 
         if (relayResult && relayResult.shouldFailover) {
+          failoverTriggered = true
           logger.warn(
             `🔁 OpenAI failover attempt ${failoverAttempts}/${OPENAI_429_FAILOVER_ATTEMPTS} triggered by OpenAI-Responses account ${accountId}`
           )
@@ -442,8 +468,20 @@ const handleResponses = async (req, res) => {
           }
 
           // 提取重置时间
-          if (errorData && errorData.error && errorData.error.resets_in_seconds) {
+          if (errorData?.error?.resets_in_seconds) {
             resetsInSeconds = errorData.error.resets_in_seconds
+          } else if (errorData?.error?.resets_in) {
+            const parsedResetsIn = Number.parseInt(errorData.error.resets_in, 10)
+            if (Number.isFinite(parsedResetsIn) && parsedResetsIn > 0) {
+              resetsInSeconds = parsedResetsIn
+            }
+          }
+
+          if (!resetsInSeconds) {
+            resetsInSeconds = upstreamErrorHelper.parseRetryAfter(upstream.headers)
+          }
+
+          if (resetsInSeconds) {
             logger.info(
               `🕐 Codex rate limit will reset in ${resetsInSeconds} seconds (${Math.ceil(resetsInSeconds / 60)} minutes / ${Math.ceil(resetsInSeconds / 3600)} hours)`
             )
@@ -475,6 +513,7 @@ const handleResponses = async (req, res) => {
         logger.warn(
           `🔁 OpenAI failover attempt ${failoverAttempts}/${OPENAI_429_FAILOVER_ATTEMPTS} triggered by account ${accountId}`
         )
+        failoverTriggered = true
 
         if (failoverAttempts < OPENAI_429_FAILOVER_ATTEMPTS) {
           continue

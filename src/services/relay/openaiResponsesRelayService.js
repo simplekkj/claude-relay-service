@@ -838,19 +838,24 @@ class OpenAIResponsesRelayService {
       if (errorData && errorData.error) {
         if (errorData.error.resets_in_seconds) {
           resetsInSeconds = errorData.error.resets_in_seconds
-          logger.info(
-            `🕐 Rate limit will reset in ${resetsInSeconds} seconds (${Math.ceil(resetsInSeconds / 60)} minutes / ${Math.ceil(resetsInSeconds / 3600)} hours)`
-          )
         } else if (errorData.error.resets_in) {
           // 某些 API 可能使用不同的字段名
-          resetsInSeconds = parseInt(errorData.error.resets_in)
-          logger.info(
-            `🕐 Rate limit will reset in ${resetsInSeconds} seconds (${Math.ceil(resetsInSeconds / 60)} minutes / ${Math.ceil(resetsInSeconds / 3600)} hours)`
-          )
+          const parsedResetsIn = Number.parseInt(errorData.error.resets_in, 10)
+          if (Number.isFinite(parsedResetsIn) && parsedResetsIn > 0) {
+            resetsInSeconds = parsedResetsIn
+          }
         }
       }
 
       if (!resetsInSeconds) {
+        resetsInSeconds = upstreamErrorHelper.parseRetryAfter(response.headers)
+      }
+
+      if (resetsInSeconds) {
+        logger.info(
+          `🕐 Rate limit will reset in ${resetsInSeconds} seconds (${Math.ceil(resetsInSeconds / 60)} minutes / ${Math.ceil(resetsInSeconds / 3600)} hours)`
+        )
+      } else {
         logger.warn('⚠️ Could not extract reset time from 429 response, using default 60 minutes')
       }
     } catch (e) {
