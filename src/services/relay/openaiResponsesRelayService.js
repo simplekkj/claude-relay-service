@@ -61,8 +61,9 @@ class OpenAIResponsesRelayService {
   }
 
   // 处理请求转发
-  async handleRequest(req, res, account, apiKeyData) {
+  async handleRequest(req, res, account, apiKeyData, options = {}) {
     let abortController = null
+    const return429ForFailover = options.return429ForFailover === true
     // 获取会话哈希（如果有的话）
     const sessionId = req.headers['session_id'] || req.body?.session_id
     const sessionHash = sessionId
@@ -183,6 +184,21 @@ class OpenAIResponsesRelayService {
             resets_in_seconds: resetsInSeconds
           }
         }
+
+        // failover 模式下由上层继续选号重试，不在这里直接返回给客户端
+        if (return429ForFailover) {
+          req.removeListener('close', handleClientDisconnect)
+          res.removeListener('close', handleClientDisconnect)
+          if (abortController && !abortController.signal.aborted) {
+            abortController.abort()
+          }
+          return {
+            shouldFailover: true,
+            status: 429,
+            errorResponse
+          }
+        }
+
         return res.status(429).json(errorResponse)
       }
 
