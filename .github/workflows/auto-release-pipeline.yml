@@ -6,6 +6,10 @@ on:
       - main
   workflow_dispatch:  # 支持手动触发
 
+concurrency:
+  group: auto-release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
   packages: write
@@ -25,82 +29,25 @@ jobs:
     - name: Check if version bump is needed
       id: check
       run: |
-        # 检查提交消息是否包含强制发布标记（[force release]）
+        # 需求调整：无论是同步上游（fork sync merge）还是自身代码变更，只要 push/手动触发即执行发布与镜像构建。
+        # 仍保留顶层 job if：提交者不是 github-actions[bot] 且 commit message 未含 [skip ci]。
+
         COMMIT_MSG=$(git log -1 --pretty=%B | tr -d '\r')
         echo "Latest commit message:"
         echo "$COMMIT_MSG"
 
-        FORCE_RELEASE=false
-        if echo "$COMMIT_MSG" | grep -qi "\[force release\]"; then
-          echo "Detected [force release] marker, forcing version bump"
-          FORCE_RELEASE=true
-        fi
-
-        # 检测是否是合并提交
-        PARENT_COUNT=$(git rev-list --parents -n 1 HEAD | wc -w)
-        PARENT_COUNT=$((PARENT_COUNT - 1))
-        echo "Parent count: $PARENT_COUNT"
-        
-        if [ "$PARENT_COUNT" -gt 1 ]; then
-          # 合并提交：获取合并进来的所有文件变更
-          echo "Detected merge commit, getting all merged changes"
-          # 获取合并基准点
-          MERGE_BASE=$(git merge-base HEAD^1 HEAD^2 2>/dev/null || echo "")
-          if [ -n "$MERGE_BASE" ]; then
-            # 获取从合并基准到 HEAD 的所有变更
-            CHANGED_FILES=$(git diff --name-only $MERGE_BASE..HEAD)
-          else
-            # 如果无法获取合并基准，使用第二个父提交
-            CHANGED_FILES=$(git diff --name-only HEAD^2..HEAD)
-          fi
-        else
-          # 普通提交：获取相对于上一个提交的变更
-          CHANGED_FILES=$(git diff --name-only HEAD~1..HEAD 2>/dev/null || git diff --name-only $(git rev-list --max-parents=0 HEAD)..HEAD)
-        fi
-        
-        echo "Changed files:"
-        echo "$CHANGED_FILES"
-        
-        # 检查是否只有无关文件（.md, docs/, .github/等）
-        SIGNIFICANT_CHANGES=false
-        while IFS= read -r file; do
-          # 跳过空行
-          [ -z "$file" ] && continue
-          
-          # 检查是否是需要忽略的文件
-          if [[ ! "$file" =~ \.(md|txt)$ ]] && 
-             [[ ! "$file" =~ ^docs/ ]] && 
-             [[ ! "$file" =~ ^\.github/ ]] &&
-             [[ "$file" != "VERSION" ]] &&
-             [[ "$file" != ".gitignore" ]] &&
-             [[ "$file" != "LICENSE" ]]; then
-            echo "Found significant change in: $file"
-            SIGNIFICANT_CHANGES=true
-            break
-          fi
-        done <<< "$CHANGED_FILES"
-
-        # 检查是否是手动触发
-        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-          echo "Manual workflow trigger detected, forcing version bump"
-          echo "needs_bump=true" >> $GITHUB_OUTPUT
-        elif [ "$FORCE_RELEASE" = true ]; then
-          echo "Force release marker detected, forcing version bump"
-          echo "needs_bump=true" >> $GITHUB_OUTPUT
-        elif [ "$SIGNIFICANT_CHANGES" = true ]; then
-          echo "Significant changes detected, version bump needed"
-          echo "needs_bump=true" >> $GITHUB_OUTPUT
-        else
-          echo "No significant changes, skipping version bump"
-          echo "needs_bump=false" >> $GITHUB_OUTPUT
-        fi
+        echo "Always bump version and run release pipeline for main pushes (sync or local changes)."
+        echo "needs_bump=true" >> $GITHUB_OUTPUT
 
     - name: Get current version
       if: steps.check.outputs.needs_bump == 'true'
       id: get_version
       run: |
-        # 获取最新的tag版本
-        LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+        # 获取全局最高语义化tag版本（而不是当前分支最近祖先tag）
+        LATEST_TAG=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1)
+        if [ -z "$LATEST_TAG" ]; then
+          LATEST_TAG="v0.0.0"
+        fi
         echo "Latest tag: $LATEST_TAG"
         TAG_VERSION=${LATEST_TAG#v}
         
@@ -137,23 +84,24 @@ jobs:
         # 默认递增patch版本
         NEW_PATCH=$((PATCH + 1))
         NEW_VERSION="${MAJOR}.${MINOR}.${NEW_PATCH}"
+
+        # 若tag已存在（本地或远端），继续递增直到找到可用版本
+        while git rev-parse -q --verify "refs/tags/v${NEW_VERSION}" >/dev/null || \
+              git ls-remote --tags origin "refs/tags/v${NEW_VERSION}" | grep -q .; do
+          echo "Tag v${NEW_VERSION} already exists, bumping patch..."
+          NEW_PATCH=$((NEW_PATCH + 1))
+          NEW_VERSION="${MAJOR}.${MINOR}.${NEW_PATCH}"
+        done
         
         echo "New version: $NEW_VERSION"
         echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
         echo "new_tag=v$NEW_VERSION" >> $GITHUB_OUTPUT
 
-    - name: Update VERSION file
+    - name: Configure git identity
       if: steps.check.outputs.needs_bump == 'true'
       run: |
-        echo "${{ steps.next_version.outputs.new_version }}" > VERSION
-        
-        # 配置git
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
-        
-        # 提交VERSION文件 - 添加 [skip ci] 以避免再次触发
-        git add VERSION
-        git commit -m "chore: sync VERSION file with release ${{ steps.next_version.outputs.new_tag }} [skip ci]"
 
     # 构建前端并推送到 web-dist 分支
     - name: Setup Node.js
@@ -262,8 +210,12 @@ jobs:
       if: steps.check.outputs.needs_bump == 'true'
       run: |
         NEW_TAG="${{ steps.next_version.outputs.new_tag }}"
+        if git ls-remote --tags origin "refs/tags/${NEW_TAG}" | grep -q .; then
+          echo "Tag ${NEW_TAG} already exists on remote, skip creating duplicate tag."
+          exit 0
+        fi
         git tag -a "$NEW_TAG" -m "Release $NEW_TAG"
-        git push origin HEAD:main "$NEW_TAG"
+        git push origin "$NEW_TAG"
 
     - name: Prepare image names
       id: image_names
@@ -271,7 +223,7 @@ jobs:
       run: |
         DOCKER_USERNAME="${{ secrets.DOCKERHUB_USERNAME }}"
         if [ -z "$DOCKER_USERNAME" ]; then
-          DOCKER_USERNAME="weishaw"
+          DOCKER_USERNAME="leeyx"
         fi
 
         DOCKER_IMAGE=$(echo "${DOCKER_USERNAME}/claude-relay-service" | tr '[:upper:]' '[:lower:]')
@@ -282,29 +234,35 @@ jobs:
           echo "ghcr_image=${GHCR_IMAGE}"
         } >> "$GITHUB_OUTPUT"
 
+    - name: Build release notes file
+      if: steps.check.outputs.needs_bump == 'true'
+      run: |
+        cat > release-body.md <<'EOF'
+        ## 🐳 Docker 镜像
+        
+        ```bash
+        docker pull ${{ steps.image_names.outputs.docker_image }}:${{ steps.next_version.outputs.new_tag }}
+        docker pull ${{ steps.image_names.outputs.docker_image }}:latest
+        docker pull ${{ steps.image_names.outputs.ghcr_image }}:${{ steps.next_version.outputs.new_tag }}
+        docker pull ${{ steps.image_names.outputs.ghcr_image }}:latest
+        ```
+        
+        ## 📦 主要更新
+        
+        ${{ steps.changelog.outputs.content }}
+        
+        ## 📋 完整更新日志
+        
+        查看 [所有版本](https://github.com/${{ github.repository }}/releases)
+        EOF
+
     - name: Create GitHub Release
       if: steps.check.outputs.needs_bump == 'true'
       uses: softprops/action-gh-release@v1
       with:
         tag_name: ${{ steps.next_version.outputs.new_tag }}
         name: Release ${{ steps.next_version.outputs.new_version }}
-        body: |
-          ## 🐳 Docker 镜像
-          
-          ```bash
-          docker pull ${{ steps.image_names.outputs.docker_image }}:${{ steps.next_version.outputs.new_tag }}
-          docker pull ${{ steps.image_names.outputs.docker_image }}:latest
-          docker pull ${{ steps.image_names.outputs.ghcr_image }}:${{ steps.next_version.outputs.new_tag }}
-          docker pull ${{ steps.image_names.outputs.ghcr_image }}:latest
-          ```
-          
-          ## 📦 主要更新
-          
-          ${{ steps.changelog.outputs.content }}
-          
-          ## 📋 完整更新日志
-          
-          查看 [所有版本](https://github.com/${{ github.repository }}/releases)
+        body_path: release-body.md
         draft: false
         prerelease: false
         generate_release_notes: true
