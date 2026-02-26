@@ -368,7 +368,7 @@ class WeeklyClaudeCostInitService {
           const models = []
           for (const usageKey of keys) {
             const match = usageKey.match(/^usage:[^:]+:model:daily:(.+):(\d{4}-\d{2}-\d{2})$/)
-            if (!match || !isOpusModel(match[1])) {
+            if (!match || !isClaudeFamilyModel(match[1])) {
               continue
             }
             models.push(match[1])
